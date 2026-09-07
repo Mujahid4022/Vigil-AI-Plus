@@ -255,39 +255,196 @@ def comment_on_post(post_id: str, message: str, access_token: str) -> str:
 # ----------------------------------------------------------------------
 def get_post_insights(post_id: str, access_token: str) -> dict:
     """
-    Fetches engagement metrics for a specific post.
-    Returns a dict with impressions, reach, likes, comments, shares.
+    Fetch performance analytics for a Facebook Page post.
+
+    Each insight metric is requested separately so that one unsupported
+    metric does not cause all analytics to fail.
+
+    The unsupported `shares` field is intentionally not requested.
     """
-    metrics = [
+
+    insights_metrics = [
         "post_impressions",
+        "post_impressions_unique",
         "post_engaged_users",
         "post_clicks",
-        "post_like_count",
-        "post_comment_count",
-        "post_share_count",
     ]
-    metric_string = ",".join(metrics)
-    url = (
-        f"https://graph.facebook.com/{FB_GRAPH_API_VERSION}/{post_id}/insights"
-        f"?metric={metric_string}&access_token={access_token}"
-    )
+
+    base_url = f"https://graph.facebook.com/{FB_GRAPH_API_VERSION}"
+
+    result = {}
 
     try:
-        response = requests.get(url)
-        data = response.json()
-        if "data" in data:
-            result = {}
-            for item in data["data"]:
-                result[item["name"]] = item["values"][0]["value"]
-            return result
-        else:
-            print(f"⚠️ No insights data for {post_id}")
-            return None
-    except Exception as e:
-        print(f"❌ Insights error: {e}")
+        # ==============================================================
+        # STEP A: Fetch each insight metric separately
+        # ==============================================================
+
+        for metric in insights_metrics:
+
+            insights_url = f"{base_url}/{post_id}/insights"
+
+            params = {
+                "metric": metric,
+                "access_token": access_token,
+            }
+
+            try:
+                response = requests.get(
+                    insights_url,
+                    params=params,
+                    timeout=20
+                )
+
+                print(
+                    f"🔍 Insight metric '{metric}' "
+                    f"HTTP Status: {response.status_code}"
+                )
+
+                try:
+                    data = response.json()
+                except ValueError:
+                    print(
+                        f"❌ Invalid JSON for metric '{metric}': "
+                        f"{response.text[:500]}"
+                    )
+                    continue
+
+                print(
+                    f"🔍 Insight '{metric}' API Raw: {data}"
+                )
+
+                if response.ok and data.get("data"):
+
+                    for item in data["data"]:
+
+                        metric_name = item.get("name")
+                        values = item.get("values", [])
+
+                        if metric_name and values:
+
+                            value = values[0].get("value", 0)
+
+                            if value is None:
+                                value = 0
+
+                            result[metric_name] = value
+
+                elif "error" in data:
+
+                    print(
+                        f"⚠️ Facebook metric '{metric}' "
+                        f"not available: {data['error']}"
+                    )
+
+            except requests.RequestException as e:
+
+                print(
+                    f"⚠️ Request failed for metric "
+                    f"'{metric}': {e}"
+                )
+
+        # ==============================================================
+        # STEP B: Fetch reactions and comments
+        # ==============================================================
+
+        fields_url = f"{base_url}/{post_id}"
+
+        fields_params = {
+            "fields": "reactions.summary(true),comments.summary(true)",
+            "access_token": access_token,
+        }
+
+        fields_response = requests.get(
+            fields_url,
+            params=fields_params,
+            timeout=20
+        )
+
+        print(
+            f"🔍 Fields HTTP Status: "
+            f"{fields_response.status_code}"
+        )
+
+        try:
+            fields_resp = fields_response.json()
+        except ValueError:
+            print("❌ Fields API returned invalid JSON:")
+            print(fields_response.text[:1000])
+            fields_resp = {}
+
+        print(f"🔍 Fields API Raw: {fields_resp}")
+
+        if fields_response.ok and "error" not in fields_resp:
+
+            # ----------------------------------------------------------
+            # Reactions / Likes
+            # ----------------------------------------------------------
+            reactions = fields_resp.get("reactions") or {}
+            reaction_summary = reactions.get("summary") or {}
+
+            result["post_likes"] = reaction_summary.get(
+                "total_count",
+                0
+            )
+
+            # ----------------------------------------------------------
+            # Comments
+            # ----------------------------------------------------------
+            comments = fields_resp.get("comments") or {}
+            comment_summary = comments.get("summary") or {}
+
+            result["post_comments"] = comment_summary.get(
+                "total_count",
+                0
+            )
+
+        elif "error" in fields_resp:
+
+            print(
+                f"❌ Facebook Fields Error: "
+                f"{fields_resp['error']}"
+            )
+
+        # ==============================================================
+        # STEP C: Shares
+        # ==============================================================
+
+        # Facebook rejected the `shares` field in the current API.
+        # Do not request it because it causes the entire fields request
+        # to fail.
+        result["post_shares"] = 0
+
+        # ==============================================================
+        # STEP D: Make sure all expected keys exist
+        # ==============================================================
+
+        result.setdefault("post_impressions", 0)
+        result.setdefault("post_impressions_unique", 0)
+        result.setdefault("post_engaged_users", 0)
+        result.setdefault("post_clicks", 0)
+
+        result.setdefault("post_likes", 0)
+        result.setdefault("post_comments", 0)
+        result.setdefault("post_shares", 0)
+
+        # ==============================================================
+        # STEP E: Final result
+        # ==============================================================
+
+        print(f"📊 Final Post Insights: {result}")
+
+        return result
+
+    except requests.RequestException as e:
+
+        print(f"❌ Facebook API request error: {e}")
         return None
 
+    except Exception as e:
 
+        print(f"❌ Insights parser error: {e}")
+        return None
+    
 # ----------------------------------------------------------------------
 # 7. Get page info – for debugging
 # ----------------------------------------------------------------------
