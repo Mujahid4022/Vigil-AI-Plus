@@ -1,4 +1,5 @@
 import os
+import shutil
 import json
 import time
 import threading
@@ -29,6 +30,28 @@ def load_drivers():
         with open(DRIVER_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     return {}
+
+
+def fetch_video_from_product_page(product_url):
+    """Simple requests-based video detection – works only if video URL is in static HTML."""
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        resp = requests.get(product_url, headers=headers, timeout=10)
+        html = resp.text
+        import re, json
+        # Try to find videoUrl in the page's JSON
+        match = re.search(r'"videoUrl"\s*:\s*"([^"]+)"', html)
+        if match:
+            url = match.group(1)
+            if url.startswith('http'):
+                return url
+        # Look for .mp4 links directly
+        match = re.search(r'https?://[^"\' ]+\.mp4[^"\' ]*', html)
+        if match:
+            return match.group(0)
+        return None
+    except:
+        return None
 
 def get_facebook_page_name(page_id, access_token):
     """Fetches the actual Facebook Page name using the Graph API."""
@@ -320,7 +343,27 @@ HTML_TEMPLATE = """
         }
         .hidden-product {
             display: none !important;
-        }        
+        }
+        .badge-video {
+            background: #22c55e;
+            color: white;
+            padding: 2px 12px;
+            border-radius: 20px;
+            font-size: 13px;
+            font-weight: bold;
+            display: inline-block;
+            margin: 5px 0;
+        }
+        .badge-image {
+            background: #9ca3af;
+            color: white;
+            padding: 2px 12px;
+            border-radius: 20px;
+            font-size: 13px;
+            font-weight: bold;
+            display: inline-block;
+            margin: 5px 0;
+        }
     </style>
 <script>
 // ===== Toggle URLs (Existing) =====
@@ -1236,6 +1279,20 @@ AFFILIATE_HTML = """
         }
     });
 
+    // ===== FILTER VIDEO PRODUCTS =====
+    function filterProducts() {
+        const onlyVideo = document.getElementById('filterVideoOnly').checked;
+        const cards = document.querySelectorAll('.product-card');
+        cards.forEach(card => {
+            const hasVideo = card.dataset.hasVideo === 'true';
+            if (onlyVideo && !hasVideo) {
+                card.style.display = 'none';
+            } else {
+                card.style.display = 'flex';
+            }
+        });
+    }
+
     // Run on page load to handle pre-selected provider
     document.addEventListener('DOMContentLoaded', updateFields);
 </script>
@@ -1267,13 +1324,15 @@ AFFILIATE_HTML = """
         {% if search_results %}
         <hr>
         <h3>📦 Product Preview ({{ search_results|length }} found)</h3>
+
+        <div id="productContainer">
         <form method="POST" action="/schedule_affiliate_posts">
             <input type="hidden" name="page_id" value="{{ current_page_id }}">
             <input type="hidden" name="provider_name" value="{{ current_provider }}">
             <input type="hidden" name="search_term" value="{{ search_term }}">
             
             {% for product in search_results %}
-            <div class="product-card" id="product-{{ loop.index0 }}" style="{% if product.scheduled %}display:none;{% endif %}">
+            <div class="product-card" id="product-{{ loop.index0 }}" data-has-video="{{ product.has_video|lower }}">
                 <img src="{{ product.image_url }}" alt="{{ product.name }}" class="product-image" onerror="this.src='https://via.placeholder.com/150'">
                 <div class="product-details">
                     <strong>{{ product.name }}</strong><br>
@@ -1290,20 +1349,36 @@ AFFILIATE_HTML = """
                         <strong>${{ product.price }}</strong>
                     {% endif %}
                     <br>
+                    <!-- VIDEO BADGE -->
+                    {% if product.has_video %}
+                        <span class="badge-video">🎬 Video Available</span>
+                    {% else %}
+                        <span class="badge-image">📷 Image Only</span>
+                    {% endif %}
+                    <br>
                     <strong>Description:</strong><br>
                     <textarea name="desc_{{ loop.index0 }}">{{ product.description or 'No description available. Please check the product link for details.' }}</textarea>
                     <div class="inline-flex">
                         <label>Schedule for:</label>
                         <input type="datetime-local" name="time_{{ loop.index0 }}" value="{{ default_time }}" required>
                         <input type="hidden" name="product_id_{{ loop.index0 }}" value="{{ product.product_id }}">
-                        <button type="submit" name="schedule_index" value="{{ loop.index0 }}" class="btn-success">📅 Schedule This Product</button>
-                        <a href="{{ product.product_url }}" target="_blank" class="btn-warning" style="padding:8px 16px; text-decoration:none; border-radius:5px;">🔗 View on AliExpress</a>
+                        <input type="hidden" name="has_video_{{ loop.index0 }}" value="{{ product.has_video|lower }}">
+    
+                        <!-- NEW: Manual video URL input -->
+                        <label style="font-size:12px; white-space:nowrap;">Video URL:</label>
+                        <input type="text" name="video_url_{{ loop.index0 }}" value="{{ product.video_url or '' }}" 
+                               placeholder="Paste video URL here" 
+                               style="width:250px; padding:4px; font-size:12px; border:1px solid #ccc; border-radius:4px;">
+    
+                        <button type="submit" name="schedule_index" value="{{ loop.index0 }}" class="btn-success">📅 Schedule</button>
+                        <a href="{{ product.product_url }}" target="_blank" class="btn-warning" style="padding:8px 16px; text-decoration:none; border-radius:5px;">🔗 View</a>
                         <button type="button" onclick="removeProduct('{{ loop.index0 }}')" class="btn-remove">✖ Remove</button>
                     </div>
                 </div>
             </div>
             {% endfor %}
         </form>
+        </div>
         {% endif %}
     </div>
 
@@ -1356,7 +1431,8 @@ def affiliate_dashboard():
 @requires_auth
 def search_products():
     from src.utils.affiliate_api import search_products as search_products_api
-    
+    import concurrent.futures
+
     config = load_config()
     page_id = request.form.get("page_id")
     provider_name = request.form.get("provider_name")
@@ -1375,16 +1451,25 @@ def search_products():
     # Fetch products using the universal engine
     products = search_products_api(provider, search_term)
     
+    # ---- NEW: Enrich with video status ----
+    def enrich_product(product):
+        video_url = fetch_video_from_product_page(product.get('product_url', ''))
+        product['has_video'] = bool(video_url)
+        product['video_url'] = video_url
+        return product
+
+    # Use ThreadPoolExecutor to check up to 5 products at once
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        enriched_products = list(executor.map(enrich_product, products))
+    
     # Filter out products that are already scheduled
     all_scheduled = config.get("scheduled_affiliate_posts", [])
     scheduled_ids = [p.get("product_id") for p in all_scheduled if p.get("product_id")]
-    products = [p for p in products if p.get("product_id") not in scheduled_ids]
+    enriched_products = [p for p in enriched_products if p.get("product_id") not in scheduled_ids]
     
     # Re-render the page with results
     providers = config.get("affiliate_providers", [])
     pages = config.get("pages", [])
-    # Filter out posted posts
-    all_scheduled = config.get("scheduled_affiliate_posts", [])
     scheduled = [p for p in all_scheduled if not p.get("posted", False)]
     
     from datetime import datetime, timedelta
@@ -1395,7 +1480,7 @@ def search_products():
         providers=providers,
         pages=pages,
         scheduled_posts=scheduled,
-        search_results=products,
+        search_results=enriched_products,
         current_page_id=page_id,
         current_provider=provider_name,
         default_time=default_time,
@@ -1473,7 +1558,9 @@ def schedule_affiliate_posts():
         "description_override": description,
         "scheduled_time": scheduled_time_utc,
         "posted": False,
-        "fb_post_id": None
+        "fb_post_id": None,
+        "video_url": request.form.get(f"video_url_{index}", ""),
+        "has_video": request.form.get(f"has_video_{index}", "false").lower() == "true"
     }
     config["scheduled_affiliate_posts"].append(new_post)
     save_config(config)
@@ -1790,22 +1877,55 @@ The post should have:
 #DealAlert #Pakistan #Shopping"""
 
     # 8. Post to Facebook
-    from src.core.facebook_client import post_to_facebook
+    from src.core.facebook_client import post_to_facebook, post_video_to_facebook, get_post_insights
+    from src.engines.engine_1_urdu_poetry import log_performance
     
     print(f"📤 Posting to Facebook using AI-generated text...")
     
-    image_url = product.get("image_url")
-    if image_url:
-        print(f"📸 Using image URL: {image_url[:100]}...")
-    else:
-        print("⚠️ No image URL available for this product.")
+    # ---- Get video or image URL ----
+    video_url = scheduled_post.get("video_url") or product.get("video_url") or product.get("product_video_url")
+    image_url = scheduled_post.get("product_image") or product.get("image_url")
 
-    post_id = post_to_facebook(
-        access_token=page["token"],
-        page_id=page["id"],
-        message=formatted_post,
-        image_url=image_url
-    )
+    # ---- Debug prints ----
+    print(f"🔍 DEBUG: video_url = {video_url}")
+    print(f"🔍 DEBUG: image_url = {image_url}")
+
+    if video_url:
+        print(f"🎬 Posting product video: {video_url[:100]}...")
+        print(f"📹 Full video URL: {video_url}")
+        post_id = post_video_to_facebook(
+            page_id=page["id"],
+            access_token=page["token"],
+            caption=formatted_post,
+            video_url=video_url
+        )
+        print(f"🔍 DEBUG: post_video_to_facebook returned: {post_id}")
+    elif image_url:
+        print(f"📸 Using image URL: {image_url[:100]}...")
+        print(f"🖼️ Full image URL: {image_url}")
+        post_id = post_to_facebook(
+            access_token=page["token"],
+            page_id=page["id"],
+            message=formatted_post,
+            image_url=image_url
+        )
+        print(f"🔍 DEBUG: post_to_facebook returned: {post_id}")
+    else:
+        print("⚠️ No image or video URL available. Posting text only.")
+        post_id = post_to_facebook(
+            access_token=page["token"],
+            page_id=page["id"],
+            message=formatted_post,
+            image_url=None
+        )
+
+    # ---- Log performance for affiliate post ----
+    if post_id:
+        insights = get_post_insights(post_id, page["token"])
+        log_performance(post_id, insights, page["id"])
+        print(f"📊 Analytics logged for post: {post_id}")
+    else:
+        print("❌ No post ID returned – skipping analytics logging.")
 
     return post_id
 
