@@ -13,6 +13,7 @@
     "field_mapping": {
       "product_id": "product_id",
       "name": "product_title",
+      "video_url": "product_video_url",
       "price": "target_sale_price",
       "currency": "target_sale_price_currency",
       "image_url": "product_small_image_urls.string.0",
