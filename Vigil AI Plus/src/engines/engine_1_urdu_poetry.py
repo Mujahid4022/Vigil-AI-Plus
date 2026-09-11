@@ -816,13 +816,70 @@ def run_engine_1(page):
         # ------------------------------------------------------------------
         # LOG PERFORMANCE IF POST SUCCEEDED
         # ------------------------------------------------------------------
-        if post_id:
-            posts_made += 1
-            insights = get_post_insights(post_id, page["token"])
-            if insights:
-                log_performance(post_id, insights, page["id"])
-            if idx < len(urls_to_process) - 1:
-                time.sleep(post_interval)
+        if page.get("approval_required", False):
+            # ---- SAVE AS DRAFT instead of posting ----
+            import uuid as _uuid
+            import shutil
+            draft_id = str(_uuid.uuid4())[:8]
+
+            # Save image to persistent folder
+            PENDING_DIR = os.path.join("data", "pending")
+            os.makedirs(PENDING_DIR, exist_ok=True)
+            pending_image = os.path.join(PENDING_DIR, f"{draft_id}.jpg")
+
+            if temp_image_path and os.path.exists(temp_image_path):
+                shutil.copy(temp_image_path, pending_image)
+
+            # Add to config
+            CONFIG_FILE_LOCAL = "config.json"
+            with open(CONFIG_FILE_LOCAL, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            if "pending_approvals" not in cfg:
+                cfg["pending_approvals"] = []
+            cfg["pending_approvals"].append({
+                "id": draft_id,
+                "page_id": page["id"],
+                "caption": formatted_post,
+                "image_path": pending_image if os.path.exists(pending_image) else None,
+                "video_url": "",
+                "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            })
+            with open(CONFIG_FILE_LOCAL, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=4)
+
+            # Notify Telegram
+            try:
+                from src.core.telegram_bot import send_draft_notification
+                import asyncio
+                asyncio.run_coroutine_threadsafe(
+                    send_draft_notification(
+                        post_id=draft_id,
+                        page_name=page.get("name", page["id"]),
+                        caption=formatted_post,
+                        image_path=pending_image if os.path.exists(pending_image) else None,
+                    ),
+                    asyncio.get_event_loop(),
+                )
+            except Exception as e:
+                print(f"⚠️ Could not notify Telegram: {e}")
+
+            print(f"📤 Draft {draft_id} saved, waiting for approval.")
+
+            # Cleanup temp image
+            if temp_image_path and os.path.exists(temp_image_path):
+                os.remove(temp_image_path)
+
+            continue  # Skip Facebook posting
+
+        else:
+            # ---- POST DIRECTLY (no approval needed) ----
+            if post_id:
+                posts_made += 1
+                insights = get_post_insights(post_id, page["token"])
+                if insights:
+                    log_performance(post_id, insights, page["id"])
+                if idx < len(urls_to_process) - 1:
+                    time.sleep(post_interval)
 
         # --------------------------------------------------------------
         # CROSS-POSTING & LEAD TRACKING (Twitter, Instagram, Webhooks)
