@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Vigil AI - Affiliate Marketing</title>
+    <style>
+        body { font-family: Arial; max-width: 1000px; margin: 40px auto; padding: 20px; background: #f4f7f6; }
+        .card { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        h2, h3, h4 { margin-top: 0; }
+        input, textarea, select { width: 100%; padding: 8px; margin: 5px 0 15px 0; border: 1px solid #ccc; border-radius: 5px; box-sizing: border-box; }
+        button { padding: 8px 16px; background: #007bff; color: white; border: none; border-radius: 5px; cursor: pointer; }
+        button:hover { background: #0056b3; }
+        .btn-success { background: #28a745; }
+        .btn-success:hover { background: #1e7e34; }
+        .btn-danger { background: #dc3545; }
+        .btn-danger:hover { background: #c82333; }
+        .btn-warning { background: #ffc107; color: black; }
+        .btn-warning:hover { background: #d39e00; }
+        .product-card { border: 1px solid #ddd; padding: 15px; margin: 15px 0; border-radius: 8px; display: flex; gap: 20px; align-items: flex-start; background: #f9f9f9; }
+        .product-image { width: 150px; height: 150px; object-fit: contain; background: white; border-radius: 8px; border: 1px solid #eee; }
+        .product-details { flex: 1; }
+        .provider-item { background: #e9ecef; padding: 10px; margin: 5px 0; border-radius: 5px; display: flex; justify-content: space-between; align-items: center; }
+        .queue-item { background: #e3f2fd; padding: 10px; margin: 5px 0; border-radius: 5px; display: flex; justify-content: space-between; align-items: center; }
+        .back-link { display: inline-block; margin-bottom: 20px; text-decoration: none; color: #007bff; font-weight: bold; }
+        .inline-flex { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+        textarea { height: 60px; }
+        .hidden-product { display: none !important; }
+        .badge-video { background: #22c55e; color: white; padding: 2px 12px; border-radius: 20px; font-size: 13px; font-weight: bold; display: inline-block; margin: 5px 0; }
+        .badge-image { background: #9ca3af; color: white; padding: 2px 12px; border-radius: 20px; font-size: 13px; font-weight: bold; display: inline-block; margin: 5px 0; }
+        .hidden-product { display: none !important; }
+    </style>
+    <script>
+        function removeProduct(index) {
+            var el = document.getElementById('product-' + index);
+            if (el) { el.classList.add('hidden-product'); }
+        }
+    </script>
+</head>
+<body>
+
+    <a href="/" class="back-link">← Back to Main Dashboard</a>
+
+    <div class="card">
+        <h2>🔗 Affiliate Marketing Dashboard</h2>
+        <p>Search for products, preview them, and schedule them for your Facebook pages.</p>
+    </div>
+
+    <!-- 1. Add Provider Card -->
+    <div class="card" style="background: #e3f2fd;">
+        <h3>➕ Add Affiliate Provider</h3>
+        <form method="POST" action="/add_provider" id="provider_form">
+            <label>Select Provider</label>
+            <select name="provider_name" id="provider_name" required>
+                <option value="">-- Select a provider --</option>
+                <option value="aliexpress">AliExpress</option>
+                <option value="amazon">Amazon</option>
+                <option value="flipkart">Flipkart</option>
+                <option value="ebay">eBay</option>
+                <option value="alibaba">Alibaba</option>
+                <option value="walmart">Walmart</option>
+                <option value="daraz">Daraz (Pakistan)</option>
+                <option value="admitad">Admitad (166+ Brands)</option>
+            </select>
+            <label>API Key</label>
+            <input type="text" name="api_key" placeholder="Enter your API Key">
+            <label>API Secret</label>
+            <input type="text" name="api_secret" placeholder="Enter your API Secret">
+            <label>Associate Tag</label>
+            <input type="text" name="associate_tag" placeholder="Enter your Associate Tag">
+            <button type="submit" class="btn-success" style="width:100%; margin-top:15px;">💾 Save Provider</button>
+        </form>
+
+        <h4 style="margin-top:20px;">Saved Providers:</h4>
+        {% for p in providers %}
+        <div class="provider-item">
+            <span><strong>{{ p.nickname }}</strong></span>
+            <form method="POST" action="/delete_provider/{{ p.id }}" style="display:inline; margin:0;">
+                <button type="submit" class="btn-danger" style="padding: 4px 10px; font-size: 12px;">🗑️ Remove</button>
+            </form>
+        </div>
+        {% else %}
+        <p style="color:#888;">No providers added yet.</p>
+        {% endfor %}
+    </div>
+
+    <!-- 2. Search & Schedule Card -->
+    <div class="card" style="background: #fff3cd;">
+        <h3>🔍 Batch Product Search & Schedule</h3>
+        <form method="POST" action="/search_products">
+            <label>Select Facebook Page</label>
+            <select name="page_id" required>
+                <option value="">-- Select a page --</option>
+                {% for page in pages %}
+                    <option value="{{ page.id }}">{{ page.get('name') or page.get('id') }}</option>
+                {% endfor %}
+            </select>
+
+            <label>Select Provider</label>
+            <select name="provider_name" required>
+                <option value="">-- Select a provider --</option>
+                {% for p in providers %}
+                    <option value="{{ p.nickname }}">{{ p.nickname }}</option>
+                {% endfor %}
+            </select>
+
+            <label>Search Term (e.g., "wireless mouse")</label>
+            <input type="text" name="search_term" required placeholder="Search for products...">
+
+            <button type="submit" class="btn-success" style="width:100%; margin-top:15px;">🔍 Search & Preview Products</button>
+        </form>
+
+        <!-- Search Results -->
+        {% if search_results %}
+        <hr>
+        <h3>📦 Product Preview ({{ search_results|length }} found)</h3>
+
+        <!-- Pagination Controls -->
+        <div style="display:flex; justify-content:space-between; align-items:center; margin:10px 0; padding:10px; background:#f8f9fa; border-radius:6px; border:1px solid #e0e0e0;">
+            <div>
+                {% if page_no > 1 %}
+                    <a href="/affiliate_search?page_id={{ current_page_id }}&provider_name={{ current_provider }}&search_term={{ search_term|urlencode }}&page_no={{ page_no - 1 }}"
+                       class="btn-warning"
+                       style="padding:6px 14px; text-decoration:none; border-radius:5px; font-size:13px;">
+                        ⬅️ Previous 15
+                    </a>
+                {% endif %}
+            </div>
+            <div style="font-weight:bold; color:#333;">
+                📄 Page {{ page_no }}
+            </div>
+            <div>
+                {% if has_more %}
+                    <a href="/affiliate_search?page_id={{ current_page_id }}&provider_name={{ current_provider }}&search_term={{ search_term|urlencode }}&page_no={{ page_no + 1 }}"
+                       class="btn-success"
+                       style="padding:6px 14px; text-decoration:none; border-radius:5px; font-size:13px;">
+                        Next 15 ➡️
+                    </a>
+                {% else %}
+                    <span style="color:#dc3545; font-weight:bold; font-size:13px;">
+                        🚫 No more results found
+                    </span>
+                {% endif %}
+            </div>
+        </div>
+
+        <div id="productContainer">
+
+            {% for product in search_results %}
+            <div class="product-card" id="product-{{ loop.index0 }}">
+
+                <img src="{{ product.image_url }}" alt="{{ product.name }}" class="product-image" onerror="this.src='https://via.placeholder.com/150'">
+
+                <div class="product-details">
+                    <strong>{{ product.name }}</strong><br>
+                    <strong>Price:</strong>
+                    {% if product.sale_price_cny and product.sale_price_usd %}
+                        {{ product.sale_price_cny }} {{ product.currency_cny }} (~{{ product.sale_price_usd }} {{ product.currency_usd }})
+                    {% else %}
+                        <strong>${{ product.price }}</strong>
+                    {% endif %}
+                    <br>
+
+                    <!-- EACH PRODUCT HAS ITS OWN FORM -->
+                    <form method="POST" action="/schedule_affiliate_posts" style="margin-top:10px;">
+
+                        <!-- Context fields (same for all) -->
+                        <input type="hidden" name="page_id" value="{{ current_page_id }}">
+                        <input type="hidden" name="provider_name" value="{{ current_provider }}">
+                        <input type="hidden" name="search_term" value="{{ search_term }}">
+                        <input type="hidden" name="page_no" value="{{ page_no or 1 }}">
+
+                        <!-- THIS product's data -->
+                        <input type="hidden" name="product_id" value="{{ product.product_id }}">
+                        <input type="hidden" name="product_name" value="{{ product.name }}">
+                        <input type="hidden" name="product_image" value="{{ product.image_url }}">
+                        <input type="hidden" name="product_url" value="{{ product.product_url }}">
+                        <input type="hidden" name="product_affiliate_link" value="{{ product.affiliate_link or '' }}">
+                        <input type="hidden" name="product_sale_usd" value="{{ product.sale_price_usd or '' }}">
+                        <input type="hidden" name="product_original_usd" value="{{ product.original_price_usd or '' }}">
+                        <input type="hidden" name="product_currency" value="{{ product.currency_usd or 'USD' }}">
+
+                        <strong>Description:</strong><br>
+                        <textarea name="desc">{{ product.description or 'No description available.' }}</textarea>
+
+                        <div class="inline-flex">
+                            <label>Schedule for:</label>
+                            <input type="datetime-local" name="time" value="{{ default_time }}" required style="margin:0;">
+
+                            <label style="font-size:12px; white-space:nowrap;">Video URL:</label>
+                            <input type="text" name="video_url" value="" placeholder="Paste video URL here" style="width:250px; padding:4px; font-size:12px; margin:0;">
+
+                            <button type="submit" class="btn-success">📅 Schedule</button>
+                            <a href="{{ product.product_url }}" target="_blank" class="btn-warning" style="padding:8px 16px; text-decoration:none; border-radius:5px;">🔗 View</a>
+                            <button type="button"
+                                    data-index="{{ loop.index0 }}"
+                                    onclick="removeProduct(this.dataset.index)"
+                                    class="btn-danger"
+                                    style="padding:8px 16px; font-size:13px;">
+                                ✖ Remove
+                            </button>
+                        </div>
+                    </form>
+
+                </div>
+            </div>
+            {% endfor %}
+
+        </div>
+        {% endif %}
+    </div>
+
+    <!-- 3. Scheduled Queue -->
+    <div class="card">
+        <h3>📋 Scheduled Affiliate Posts ({{ scheduled_posts|length }})</h3>
+        {% if scheduled_posts %}
+            {% for post in scheduled_posts %}
+            <div class="queue-item" style="display:flex; align-items:center; gap:15px; padding:12px; border-bottom:1px solid #eee;">
+                <img src="{{ post.product_image or 'https://via.placeholder.com/50' }}" alt="{{ post.product_name }}" style="width:50px; height:50px; object-fit:contain; border-radius:5px; border:1px solid #ddd;">
+                <div style="flex:1;">
+                    <strong>{{ post.product_name or post.search_term }}</strong><br>
+                    <span style="font-size:12px; color:#888;">Page: {{ post.page_id }} | Time: {{ post.scheduled_time }}</span>
+                </div>
+                <form method="POST" action="/cancel_scheduled/{{ post.id }}" style="display:inline; margin:0;">
+                    <button type="submit" class="btn-danger" style="padding: 4px 12px;">🗑️ Cancel</button>
+                </form>
+            </div>
+            {% endfor %}
+        {% else %}
+            <p style="color:#888;">Queue is empty. Search and schedule products above!</p>
+        {% endif %}
+    </div>
+
+</body>
+</html>

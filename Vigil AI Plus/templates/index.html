@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Vigil AI Plus</title>
+    <style>
+        body { font-family: Arial; max-width: 900px; margin: 40px auto; padding: 20px; background: #f4f7f6; }
+        .card { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        h1, h2, h3, h4 { margin-top: 0; }
+        h1 { color: #007bff; }
+        .badge { background: #28a745; color: white; padding: 4px 12px; border-radius: 20px; font-size: 13px; }
+        input, select, textarea { width: 100%; padding: 8px; margin: 5px 0 15px 0; border: 1px solid #ccc; border-radius: 5px; box-sizing: border-box; }
+        button { padding: 8px 16px; background: #007bff; color: white; border: none; border-radius: 5px; cursor: pointer; }
+        button:hover { background: #0056b3; }
+        .btn-success { background: #28a745; }
+        .btn-success:hover { background: #1e7e34; }
+        .btn-danger { background: #dc3545; }
+        .btn-danger:hover { background: #c82333; }
+        .btn-warning { background: #ffc107; color: black; }
+        .btn-warning:hover { background: #d39e00; }
+        .provider-item { background: #e9ecef; padding: 8px 12px; margin: 5px 0; border-radius: 5px; display: flex; justify-content: space-between; align-items: center; }
+        .provider-item span { font-weight: bold; }
+        .page-item { background: #f8f9fa; padding: 15px; margin: 10px 0; border-radius: 8px; border-left: 3px solid #007bff; }
+        .edit-form { background: #fff; padding: 15px; border: 1px solid #ddd; border-radius: 5px; margin-top: 10px; display: none; }
+        hr { margin: 20px 0; border: 0; border-top: 1px solid #eee; }
+        .inline-flex { display: flex; gap: 10px; flex-wrap: wrap; }
+
+        /* ===== COLLAPSIBLE ACCORDION ===== */
+        .collapsible-header {
+            background: #007bff;
+            color: white;
+            cursor: pointer;
+            padding: 12px 18px;
+            border-radius: 8px;
+            margin-top: 15px;
+            margin-bottom: 0;
+            font-weight: bold;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            user-select: none;
+            transition: background 0.2s;
+        }
+        .collapsible-header:hover {
+            background: #0056b3;
+        }
+        .collapsible-header .arrow {
+            transition: transform 0.3s;
+            font-size: 18px;
+        }
+        .collapsible-header.active .arrow {
+            transform: rotate(180deg);
+        }
+        .collapsible-content {
+            background: white;
+            padding: 20px;
+            border-radius: 0 0 10px 10px;
+            margin-bottom: 15px;
+            display: none;
+            border-left: 3px solid #007bff;
+            border-right: 1px solid #ddd;
+            border-bottom: 1px solid #ddd;
+        }
+        .collapsible-content.active {
+            display: block;
+        }
+    </style>
+    <script>
+        function toggleSection(id) {
+            var header = document.getElementById('header-' + id);
+            var content = document.getElementById('content-' + id);
+            if (header && content) {
+                header.classList.toggle('active');
+                content.classList.toggle('active');
+            }
+        }
+
+        function toggleEditForm(pageId) {
+            var form = document.getElementById('edit-form-' + pageId);
+            if (form) {
+                form.style.display = (form.style.display === 'block') ? 'none' : 'block';
+            }
+        }
+
+        function toggleUrls(pageId) {
+            var list = document.getElementById('urlList-' + pageId);
+            var btn = document.getElementById('urlToggleBtn-' + pageId);
+            if (list && btn) {
+                if (list.style.display === 'none' || list.style.display === '') {
+                    list.style.display = 'block';
+                    btn.textContent = 'Hide';
+                } else {
+                    list.style.display = 'none';
+                    btn.textContent = 'Show';
+                }
+            }
+        }
+    </script>
+</head>
+<body>
+
+    <!-- ===== HEADER CARD ===== -->
+    <div class="card">
+        <h1>🚀 Vigil AI Plus <span class="badge">FastAPI</span></h1>
+        <p>
+            {{ message }}
+            <span style="float:right;">
+                <a href="/analytics" target="_blank" style="text-decoration:none;">📊 View Analytics</a>
+            </span>
+        </p>
+        <hr>
+        <div style="display:flex; align-items:center; gap:15px; flex-wrap:wrap;">
+            <form method="POST" action="/toggle_pause" style="display:inline; margin:0;">
+                <button type="submit" class="btn-warning">
+                    {% if bot_paused %}▶️ Resume Bot{% else %}⏸️ Pause Bot{% endif %}
+                </button>
+            </form>
+            <span style="font-weight:bold;">
+                Status: {% if bot_paused %}🔴 PAUSED{% else %}🟢 RUNNING{% endif %}
+            </span>
+            <a href="/affiliate" style="text-decoration:none; margin-left:auto;">
+                <button class="btn-success" style="padding:6px 14px; font-size:14px;">
+                    🔗 Go to Affiliate Marketing Dashboard
+                </button>
+            </a>
+        </div>
+    </div>
+
+    <!-- ===== API KEYS (Collapsible) ===== -->
+    <div class="collapsible-header" id="header-api" onclick="toggleSection('api')">
+        🔑 Manage Your AI API Keys <span class="arrow">▼</span>
+    </div>
+    <div class="collapsible-content" id="content-api">
+
+        <form method="POST" action="/add_api_key">
+            <label>AI Provider</label>
+            <select name="ai_provider" required>
+                <option value="gemini">Google Gemini</option>
+                <option value="groq">Groq Cloud</option>
+                <option value="openai">OpenAI (ChatGPT)</option>
+                <option value="anthropic">Anthropic (Claude)</option>
+                <option value="mistral">Mistral AI</option>
+                <option value="deepseek">DeepSeek</option>
+            </select>
+            <label>API Key</label>
+            <input type="text" name="api_key" required placeholder="Enter your API key...">
+            <label>Model Name (Optional)</label>
+            <input type="text" name="model_name" placeholder="e.g. openai/gpt-oss-120b">
+            <button type="submit" class="btn-success" style="width:100%;">💾 Save API Key</button>
+        </form>
+
+        <hr>
+
+        <h3>🖼️ Agnes AI Key (Image Generation)</h3>
+        <form method="POST" action="/add_agnes_key">
+            <input type="text" name="agnes_api_key" value="{{ agnes_api_key }}" placeholder="Enter your Agnes AI key...">
+            <button type="submit" class="btn-success" style="width:100%;">💾 Save Agnes Key</button>
+        </form>
+
+        <hr>
+
+        <h3>📋 Saved API Keys</h3>
+        {% if api_keys %}
+            {% for provider, data in api_keys.items() %}
+                <div class="provider-item">
+                    <span>{{ provider.capitalize() }} (Model: {{ data.get('model') or 'default' }})</span>
+                    <form method="POST" action="/delete_api_key/{{ provider }}" style="display:inline; margin:0;">
+                        <button type="submit" class="btn-danger" style="padding: 4px 10px; font-size: 12px;">Remove</button>
+                    </form>
+                </div>
+            {% endfor %}
+        {% else %}
+            <p style="color:#888;">No API keys saved yet.</p>
+        {% endif %}
+    </div>
+
+    <!-- ===== ADD PAGE (Collapsible) ===== -->
+    <div class="collapsible-header" id="header-addpage" onclick="toggleSection('addpage')">
+        ➕ Add New Facebook Page <span class="arrow">▼</span>
+    </div>
+    <div class="collapsible-content" id="content-addpage">
+
+        <form method="POST" action="/add_page">
+            <label>Facebook Page ID</label>
+            <input type="text" name="page_id" required placeholder="e.g. 123456789">
+            <label>Facebook Page Name (Optional)</label>
+            <input type="text" name="page_name" placeholder="e.g., My Deals Page">
+            <label>Facebook Access Token</label>
+            <input type="text" name="page_token" required placeholder="EAAaF...">
+            <label>AI Provider</label>
+            <select name="ai_provider" required>
+                {% if not api_keys %}
+                    <option disabled>⚠️ Please save an API key first</option>
+                {% else %}
+                    {% for provider in api_keys.keys() %}
+                        <option value="{{ provider }}">{{ provider.capitalize() }}</option>
+                    {% endfor %}
+                {% endif %}
+            </select>
+            <label>Post Language</label>
+            <select name="post_language" required>
+                <option value="Urdu">Urdu</option>
+                <option value="English">English</option>
+                <option value="Both">Both</option>
+                <option value="Auto">Auto-Detect</option>
+            </select>
+            <label>Page Brief / Topic</label>
+            <textarea name="brief" required placeholder="e.g. 'I run a small bookstore in Lahore...'"></textarea>
+            <label>Provider Priority</label>
+            <input type="text" name="provider_priority" value="gemini" placeholder="gemini,groq,openai">
+            <label>Posts per run</label>
+            <input type="number" name="posts_per_run" value="2" min="1" max="10">
+            <label>Post interval (seconds)</label>
+            <input type="number" name="post_interval" value="30" min="5" max="300">
+            <label>Instagram Account ID (Optional)</label>
+            <input type="text" name="instagram_id" placeholder="e.g. 17841412345678901">
+            <label>Lead Webhook URL (Optional)</label>
+            <input type="text" name="lead_webhook" placeholder="https://your-webhook.com">
+            <label>Schedule (Post every X hours)</label>
+            <input type="number" name="interval_hours" value="2" min="1" max="24" required>
+            <button type="submit" class="btn-success" style="width:100%; margin-top:15px;">💾 Save Page</button>
+        </form>
+    </div>
+
+    <!-- ===== INTEGRATIONS (Collapsible) ===== -->
+    <div class="collapsible-header" id="header-integrations" onclick="toggleSection('integrations')">
+        🔗 Integrations (Twitter, Telegram, Pinterest, Webhooks) <span class="arrow">▼</span>
+    </div>
+    <div class="collapsible-content" id="content-integrations">
+
+        <form method="POST" action="/update_integrations">
+
+            <h3>🐦 Twitter</h3>
+            <label>Consumer Key</label>
+            <input type="text" name="twitter_consumer_key" value="{{ twitter.get('consumer_key', '') }}">
+            <label>Consumer Secret</label>
+            <input type="text" name="twitter_consumer_secret" value="{{ twitter.get('consumer_secret', '') }}">
+            <label>Access Token</label>
+            <input type="text" name="twitter_access_token" value="{{ twitter.get('access_token', '') }}">
+            <label>Access Token Secret</label>
+            <input type="text" name="twitter_access_token_secret" value="{{ twitter.get('access_token_secret', '') }}">
+
+            <hr>
+
+            <h3>📱 Telegram</h3>
+            <label>Bot Token (from @BotFather)</label>
+            <input type="text" name="telegram_token" value="{{ telegram_token }}">
+            <label>Authorized Telegram User IDs (comma separated)</label>
+            <input type="text" name="authorized_users" value="{{ authorized_users }}" placeholder="e.g. 123456789, 987654321">
+
+            <hr>
+
+            <h3>📌 Pinterest</h3>
+            <label>App ID (Client ID)</label>
+            <input type="text" name="pinterest_client_id" value="{{ pinterest.get('client_id', '') }}">
+            <label>App Secret (Client Secret)</label>
+            <input type="text" name="pinterest_client_secret" value="{{ pinterest.get('client_secret', '') }}">
+            <label>Access Token</label>
+            <input type="text" name="pinterest_access_token" value="{{ pinterest.get('access_token', '') }}">
+            <label>Default Board ID (Optional)</label>
+            <input type="text" name="pinterest_default_board" value="{{ pinterest.get('default_board', '') }}">
+
+            <hr>
+
+            <h3>🌐 Lead Webhook</h3>
+            <label>Webhook URL (Zapier/Mailchimp)</label>
+            <input type="text" name="lead_webhook" value="{{ lead_webhook }}" placeholder="https://your-webhook.com">
+
+            <button type="submit" class="btn-success" style="width:100%; margin-top:15px;">💾 Save Integrations</button>
+        </form>
+    </div>
+
+    <!-- ===== ACTIVE PAGES (Always Visible) ===== -->
+    <div class="card">
+        <h2>📋 Your Active Pages ({{ pages|length }})</h2>
+        {% if pages %}
+            {% for page in pages %}
+            <div class="page-item">
+                <div>
+                    <strong>Page:</strong> {{ page.get('name') or page.get('id') }} |
+                    <strong>ID:</strong> {{ page.get('id') }} |
+                    <strong>Interval:</strong> {{ page.get('interval', 2) }} hours
+                </div>
+                <div style="font-size:13px; color:#555; margin-top:5px;">
+                    <strong>Provider:</strong> {{ (page.get('ai_provider', 'gemini')).capitalize() }} |
+                    <strong>Lang:</strong> {{ page.get('language', 'Urdu') }}
+                </div>
+                <div style="font-size:13px; color:#555; margin-top:5px;">
+                    <strong>Brief:</strong> {{ (page.get('brief', ''))[:80] }}...
+                </div>
+
+                <!-- ===== URLs Section (Collapsible) ===== -->
+                <div style="margin-top:15px;">
+                    <div style="display:flex; align-items:center; gap:10px;">
+                        <strong style="font-size:13px;">🔗 URLs:</strong>
+                        <button type="button"
+                                id="urlToggleBtn-{{ page.get('id') }}"
+                                data-page-id="{{ page.get('id') }}"
+                                class="btn-warning"
+                                onclick="toggleUrls(this.dataset.pageId)"
+                                style="padding:2px 10px; font-size:12px; margin:0;">
+                            Show
+                        </button>
+                        <span style="font-size:12px; color:#888;">({{ (page.get('urls') or [])|length }} saved)</span>
+                    </div>
+
+                    <div id="urlList-{{ page.get('id') }}" style="display:none; margin-top:8px; padding:10px; background:#fff; border:1px solid #eee; border-radius:5px;">
+                        {% if page.get('urls') %}
+                            {% for url in page.get('urls') %}
+                                <div style="display:flex; justify-content:space-between; align-items:center; background:#f8f9fa; padding:6px 10px; margin:5px 0; border-radius:4px; font-size:13px;">
+                                    <span style="word-break:break-all; flex:1;">{{ url }}</span>
+                                    <form method="POST" action="/remove_url/{{ page.get('id') }}" style="display:inline; margin-left:10px; margin-bottom:0;">
+                                        <input type="hidden" name="url_to_remove" value="{{ url }}">
+                                        <button type="submit" class="btn-danger" style="padding:2px 8px; font-size:11px;">X</button>
+                                    </form>
+                                </div>
+                            {% endfor %}
+                        {% else %}
+                            <p style="color:#888; font-size:13px; margin:5px 0;">No URLs added yet.</p>
+                        {% endif %}
+
+                        <form method="POST" action="/add_url/{{ page.get('id') }}" style="display:flex; gap:5px; margin-top:8px; margin-bottom:0;">
+                            <input type="text" name="new_url" placeholder="https://example.com/product" required style="flex:1; padding:5px; font-size:13px; margin:0;">
+                            <button type="submit" class="btn-success" style="padding:5px 12px; font-size:13px;">+ Add URL</button>
+                        </form>
+                    </div>
+                </div>
+
+                <div style="margin-top:10px;" class="inline-flex">
+                    <button type="button" class="btn-warning"
+                            data-page-id="{{ page.get('id') }}"
+                            onclick="toggleEditForm(this.dataset.pageId)">
+                        ✏️ Edit
+                    </button>
+                    <form method="POST" action="/test_post/{{ page.get('id') }}" style="display:inline; margin:0;">
+                        <button type="submit" class="btn-success">🟢 Test</button>
+                    </form>
+                    <form method="POST" action="/delete_page/{{ page.get('id') }}" style="display:inline; margin:0;">
+                        <button type="submit" class="btn-danger">🗑️ Remove</button>
+                    </form>
+                </div>
+
+                <!-- Edit Form (Hidden) -->
+                <div id="edit-form-{{ page.get('id') }}" class="edit-form">
+                    <h4>Edit Page: {{ page.get('id') }}</h4>
+                    <form method="POST" action="/edit_page/{{ page.get('id') }}">
+                        <label>Access Token</label>
+                        <input type="text" name="edit_token" value="{{ page.get('token', '') }}">
+                        <label>Page Name</label>
+                        <input type="text" name="edit_page_name" value="{{ page.get('name', '') }}">
+                        <label>AI Provider</label>
+                        <select name="edit_ai_provider">
+                            {% for provider in api_keys.keys() %}
+                                <option value="{{ provider }}" {% if page.get('ai_provider') == provider %}selected{% endif %}>{{ provider.capitalize() }}</option>
+                            {% endfor %}
+                        </select>
+                        <label>Language</label>
+                        <select name="edit_language">
+                            <option value="Urdu" {% if page.get('language') == 'Urdu' %}selected{% endif %}>Urdu</option>
+                            <option value="English" {% if page.get('language') == 'English' %}selected{% endif %}>English</option>
+                            <option value="Both" {% if page.get('language') == 'Both' %}selected{% endif %}>Both</option>
+                            <option value="Auto" {% if page.get('language') == 'Auto' %}selected{% endif %}>Auto</option>
+                        </select>
+                        <label>Brief</label>
+                        <textarea name="edit_brief">{{ page.get('brief', '') }}</textarea>
+                        <label>Provider Priority</label>
+                        <input type="text" name="edit_provider_priority" value="{{ page.get('provider_priority', 'gemini') }}">
+                        <label>Posts per run</label>
+                        <input type="number" name="edit_posts_per_run" value="{{ page.get('posts_per_run', 2) }}" min="1" max="10">
+                        <label>Post interval (seconds)</label>
+                        <input type="number" name="edit_post_interval" value="{{ page.get('post_interval', 30) }}" min="5" max="300">
+                        <label>Instagram Account ID</label>
+                        <input type="text" name="edit_instagram_id" value="{{ page.get('instagram_account_id', '') }}">
+                        <label>Lead Webhook URL</label>
+                        <input type="text" name="edit_lead_webhook" value="{{ page.get('lead_webhook_url', '') }}">
+                        <label>Interval (hours)</label>
+                        <input type="number" name="edit_interval" value="{{ page.get('interval', 2) }}" min="1">
+                        <div style="display:flex; gap:10px; margin-top:15px;">
+                            <button type="submit" class="btn-success">💾 Save Changes</button>
+                            <button type="button" class="btn-danger"
+                                    data-page-id="{{ page.get('id') }}"
+                                    onclick="toggleEditForm(this.dataset.pageId)">
+                                Cancel
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+            {% endfor %}
+        {% else %}
+            <p style="color:#888;">No pages added yet.</p>
+        {% endif %}
+    </div>
+
+</body>
+</html>
