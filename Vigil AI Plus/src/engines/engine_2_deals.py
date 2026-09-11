@@ -805,16 +805,8 @@ def run_engine_2(page):
                 tmp.write(image_bytes)
                 temp_image_path = tmp.name
 
-        # Call the correct function signature (returns post ID)
-        post_id = post_to_facebook(
-            access_token=page["token"],
-            page_id=page["id"],
-            message=formatted_post,
-            image_path=temp_image_path,
-        )
-
         # ------------------------------------------------------------------
-        # LOG PERFORMANCE IF POST SUCCEEDED
+        # APPROVAL CHECK — must happen BEFORE posting to Facebook
         # ------------------------------------------------------------------
         if page.get("approval_required", False):
             # ---- SAVE AS DRAFT instead of posting ----
@@ -869,17 +861,25 @@ def run_engine_2(page):
             if temp_image_path and os.path.exists(temp_image_path):
                 os.remove(temp_image_path)
 
-            continue  # Skip Facebook posting
+            continue  # Skip Facebook posting entirely
 
-        else:
-            # ---- POST DIRECTLY (no approval needed) ----
-            if post_id:
-                posts_made += 1
-                insights = get_post_insights(post_id, page["token"])
-                if insights:
-                    log_performance(post_id, insights, page["id"])
-                if idx < len(urls_to_process) - 1:
-                    time.sleep(post_interval)
+        # ------------------------------------------------------------------
+        # POST DIRECTLY (no approval needed)
+        # ------------------------------------------------------------------
+        post_id = post_to_facebook(
+            access_token=page["token"],
+            page_id=page["id"],
+            message=formatted_post,
+            image_path=temp_image_path,
+        )
+
+        if post_id:
+            posts_made += 1
+            insights = get_post_insights(post_id, page["token"])
+            if insights:
+                log_performance(post_id, insights, page["id"])
+            if idx < len(urls_to_process) - 1:
+                time.sleep(post_interval)
 
         # --------------------------------------------------------------
         # CROSS-POSTING & LEAD TRACKING (Twitter, Instagram, Webhooks)
