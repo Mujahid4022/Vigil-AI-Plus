@@ -5,12 +5,80 @@ Runs alongside FastAPI in the same asyncio event loop.
 import os
 import sys
 import json
+import uuid
 import asyncio
 import logging
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+import re
+from datetime import timedelta, datetime, timezone
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    CallbackQueryHandler,
+    MessageHandler,
+    filters,
+)
 
 logger = logging.getLogger(__name__)
+
+# Global reference to the active bot application (set at startup)
+_bot_app = None
+
+PENDING_DIR = os.path.join("data", "pending")
+os.makedirs(PENDING_DIR, exist_ok=True)
+
+
+async def send_draft_notification(post_id: str, page_name: str, caption: str, image_path: str = None):
+    """Send a draft to the admin for approval (called by engines)."""
+    global _bot_app
+    if not _bot_app:
+        logger.warning("Telegram bot not ready — skipping draft notification.")
+        return
+
+    config = load_config()
+    authorized = config.get("authorized_telegram_users", [])
+    if not authorized:
+        return
+
+    admin_id = authorized[0]
+
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Approve", callback_data=f"approve_{post_id}"),
+            InlineKeyboardButton("❌ Reject", callback_data=f"reject_{post_id}"),
+        ],
+        [InlineKeyboardButton("✏️ Edit Text", callback_data=f"edit_{post_id}")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    text = (
+        f"🤖 *New Post Ready for Review*\n\n"
+        f"📄 Page: *{page_name}*\n"
+        f"🆔 ID: `{post_id}`\n\n"
+        f"📝 Text:\n{caption[:800]}"
+    )
+
+    try:
+        if image_path and os.path.exists(image_path):
+            with open(image_path, "rb") as img:
+                await _bot_app.bot.send_photo(
+                    chat_id=admin_id,
+                    photo=img,
+                    caption=text[:1000],
+                    parse_mode="Markdown",
+                    reply_markup=reply_markup,
+                )
+        else:
+            await _bot_app.bot.send_message(
+                chat_id=admin_id,
+                text=text[:4000],
+                parse_mode="Markdown",
+                reply_markup=reply_markup,
+            )
+        print(f"📤 Draft {post_id} sent to Telegram for approval.")
+    except Exception as e:
+        logger.exception(f"Failed to send draft notification: {e}")
 
 CONFIG_FILE = "config.json"
 
@@ -190,6 +258,359 @@ async def cmd_post(update, context):
     main.BOT_PAUSED = False
     await update.message.reply_text("✅ Test post complete.")
 
+# ============ Approval workflow ============
+
+async def on_approve(update, context):
+    """Publish an approved draft to Facebook."""
+    query = update.callback_query
+    await query.answer()
+
+    if not is_authorized(update):
+        return await query.edit_message_text("🚫 Unauthorized.")
+
+    post_id = query.data.replace("approve_", "")
+    config = load_config()
+
+    draft = None
+    for d in config.get("pending_approvals", []):
+        if d["id"] == post_id:
+            draft = d
+            break
+
+    if not draft:
+        return await query.edit_message_text("❌ Draft not found (already processed?).")
+
+    try:
+        from src.core.facebook_client import post_to_facebook, post_video_to_facebook
+
+        page = next((p for p in config.get("pages", []) if p["id"] == draft["page_id"]), None)
+        if not page:
+            return await query.edit_message_text("❌ Page not found.")
+
+        image_path = draft.get("image_path")
+        caption = draft.get("caption", "")
+        video_url = draft.get("video_url", "")
+
+        if video_url:
+            post_id_fb = post_video_to_facebook(
+                page_id=page["id"],
+                access_token=page["token"],
+                caption=caption,
+                video_url=video_url,
+            )
+        else:
+            post_id_fb = post_to_facebook(
+                access_token=page["token"],
+                page_id=page["id"],
+                message=caption,
+                image_path=image_path if image_path and os.path.exists(image_path) else None,
+            )
+
+        if post_id_fb:
+            # Remove draft
+            config["pending_approvals"] = [d for d in config["pending_approvals"] if d["id"] != post_id]
+            save_config(config)
+
+            # Cleanup image
+            if image_path and os.path.exists(image_path):
+                try:
+                    os.remove(image_path)
+                except Exception:
+                    pass
+
+            await query.edit_message_caption(
+                caption=f"✅ *Published!*\n\nPost ID: `{post_id_fb}`",
+                parse_mode="Markdown",
+            )
+            print(f"✅ Approved & published draft {post_id} → FB ID: {post_id_fb}")
+        else:
+            await query.edit_message_caption(
+                caption="❌ Failed to publish. Check the logs.",
+            )
+    except Exception as e:
+        logger.exception(f"Approve failed: {e}")
+        await query.edit_message_caption(caption=f"❌ Error: {e}")
+
+
+async def on_reject(update, context):
+    """Discard a draft."""
+    query = update.callback_query
+    await query.answer()
+
+    if not is_authorized(update):
+        return await query.edit_message_text("🚫 Unauthorized.")
+
+    post_id = query.data.replace("reject_", "")
+    config = load_config()
+
+    draft = next((d for d in config.get("pending_approvals", []) if d["id"] == post_id), None)
+    if not draft:
+        return await query.edit_message_text("❌ Draft not found.")
+
+    # Remove from config
+    config["pending_approvals"] = [d for d in config["pending_approvals"] if d["id"] != post_id]
+    save_config(config)
+
+    # Cleanup image
+    image_path = draft.get("image_path")
+    if image_path and os.path.exists(image_path):
+        try:
+            os.remove(image_path)
+        except Exception:
+            pass
+
+    await query.edit_message_caption(caption=f"🗑️ Rejected. Draft `{post_id}` discarded.")
+    print(f"🗑️ Rejected draft {post_id}")
+
+
+async def on_edit(update, context):
+    """Ask the user to send new text for the draft."""
+    query = update.callback_query
+    await query.answer()
+
+    if not is_authorized(update):
+        return await query.edit_message_text("🚫 Unauthorized.")
+
+    post_id = query.data.replace("edit_", "")
+    context.user_data["editing_draft_id"] = post_id
+
+    await query.edit_message_caption(
+        caption=f"✏️ *Editing draft `{post_id}`*\n\n"
+                f"Send me the new text (a single message). "
+                f"It will *replace* the current caption, then I'll ask you to approve.",
+        parse_mode="Markdown",
+    )
+    print(f"✏️ User editing draft {post_id}")
+
+
+async def on_edit_text_reply(update, context):
+    """Handles the new text the user sends after clicking Edit."""
+    draft_id = context.user_data.get("editing_draft_id")
+    if not draft_id:
+        return  # Not in edit mode
+
+    if not is_authorized(update):
+        return await deny(update)
+
+    new_text = update.message.text.strip()
+    config = load_config()
+
+    draft = next((d for d in config.get("pending_approvals", []) if d["id"] == draft_id), None)
+    if not draft:
+        context.user_data["editing_draft_id"] = None
+        return await update.message.reply_text("❌ Draft no longer exists.")
+
+    draft["caption"] = new_text
+    save_config(config)
+
+    context.user_data["editing_draft_id"] = None
+
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Approve", callback_data=f"approve_{draft_id}"),
+            InlineKeyboardButton("❌ Reject", callback_data=f"reject_{draft_id}"),
+        ],
+        [InlineKeyboardButton("✏️ Edit Again", callback_data=f"edit_{draft_id}")],
+    ]
+
+    image_path = draft.get("image_path")
+    try:
+        if image_path and os.path.exists(image_path):
+            with open(image_path, "rb") as img:
+                await update.message.reply_photo(
+                    photo=img,
+                    caption=f"🔄 *Updated draft `{draft_id}`*\n\n{new_text[:800]}",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+        else:
+            await update.message.reply_text(
+                f"🔄 *Updated draft `{draft_id}`*\n\n{new_text[:800]}",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+    except Exception as e:
+        logger.exception(f"Edit confirmation failed: {e}")
+        await update.message.reply_text("✅ Text updated. Approve/reject via the original message.")
+
+
+# ============ /schedule workflow ============
+
+async def cmd_schedule(update, context):
+    """Start product scheduling: /schedule watch"""
+    if not is_authorized(update):
+        return await deny(update)
+
+    args = context.args
+    if not args:
+        return await update.message.reply_text(
+            "Usage: `/schedule <search term>`\nExample: `/schedule watch`",
+            parse_mode="Markdown",
+        )
+
+    search_term = " ".join(args)
+    await update.message.reply_text(
+        f"🔍 Searching AliExpress for: *{search_term}*...",
+        parse_mode="Markdown",
+    )
+
+    try:
+        from src.utils.affiliate_api import search_products
+
+        config = load_config()
+        providers = config.get("affiliate_providers", [])
+        if not providers:
+            return await update.message.reply_text("❌ No affiliate providers configured.")
+
+        provider = providers[0]
+
+        loop = asyncio.get_event_loop()
+        products = await loop.run_in_executor(None, search_products, provider, search_term)
+
+        if not products:
+            return await update.message.reply_text(f"❌ No products found for '{search_term}'.")
+
+        top5 = products[:5]
+
+        context.user_data["schedule_products"] = top5
+        context.user_data["schedule_search_term"] = search_term
+
+        text = f"📦 Found {len(products)} products. Top 5:\n\n"
+        keyboard = []
+        for i, p in enumerate(top5):
+            name = p.get("name", "Product")[:50]
+            price = p.get("sale_price_usd", "N/A")
+            text += f"*{i+1}.* {name}\n💰 ${price}\n\n"
+            keyboard.append([InlineKeyboardButton(f"{i+1}. {name[:40]}", callback_data=f"pick_{i}")])
+
+        text += "👇 Tap a product to schedule it:"
+        await update.message.reply_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown",
+        )
+
+    except Exception as e:
+        logger.exception(f"Schedule search failed: {e}")
+        await update.message.reply_text(f"❌ Search failed: {e}")
+
+
+async def on_pick_product(update, context):
+    """Handle product selection from inline button."""
+    query = update.callback_query
+    await query.answer()
+
+    if not is_authorized(update):
+        return await query.edit_message_text("🚫 Unauthorized.")
+
+    data = query.data
+    idx = int(data.split("_")[1])
+
+    products = context.user_data.get("schedule_products", [])
+    if idx >= len(products):
+        return await query.edit_message_text("❌ Product no longer available. Try /schedule again.")
+
+    selected = products[idx]
+    context.user_data["schedule_selected"] = selected
+
+    name = selected.get("name", "Product")[:60]
+    price = selected.get("sale_price_usd", "N/A")
+
+    await query.edit_message_text(
+        f"✅ Selected: *{name}*\n💰 ${price}\n\n"
+        f"⏰ When should I schedule it?\n"
+        f"Reply with a duration, e.g.:\n"
+        f"• `30m` — 30 minutes\n"
+        f"• `3h` — 3 hours\n"
+        f"• `1d` — 1 day",
+        parse_mode="Markdown",
+    )
+
+    context.user_data["awaiting_schedule_time"] = True
+
+
+async def on_time_input(update, context):
+    """Handle the time reply (only fires when awaiting_schedule_time is True)."""
+    if not context.user_data.get("awaiting_schedule_time"):
+        return
+
+    if not is_authorized(update):
+        return await deny(update)
+
+    text = update.message.text.strip().lower()
+    match = re.match(r"^(\d+)\s*(m|min|mins|minutes?|h|hr|hrs|hours?|d|days?)$", text)
+    if not match:
+        return await update.message.reply_text(
+            "❌ Invalid format. Try `3h`, `30m`, or `1d`.",
+            parse_mode="Markdown",
+        )
+
+    amount = int(match.group(1))
+    unit = match.group(2)
+
+    if unit.startswith("m"):
+        delta = timedelta(minutes=amount)
+    elif unit.startswith("h"):
+        delta = timedelta(hours=amount)
+    elif unit.startswith("d"):
+        delta = timedelta(days=amount)
+    else:
+        return await update.message.reply_text("❌ Unknown unit.")
+
+    selected = context.user_data.get("schedule_selected")
+    if not selected:
+        context.user_data["awaiting_schedule_time"] = False
+        return await update.message.reply_text("❌ No product selected. Start with /schedule.")
+
+    schedule_dt = datetime.now(timezone.utc) + delta
+    schedule_utc_str = schedule_dt.strftime("%Y-%m-%dT%H:%M")
+
+    config = load_config()
+    if "scheduled_affiliate_posts" not in config:
+        config["scheduled_affiliate_posts"] = []
+
+    pages = config.get("pages", [])
+    if not pages:
+        context.user_data["awaiting_schedule_time"] = False
+        return await update.message.reply_text("❌ No Facebook pages configured.")
+
+    page = pages[0]
+
+    new_post = {
+        "id": str(uuid.uuid4())[:8],
+        "page_id": page["id"],
+        "provider_name": "aliexpress",
+        "search_term": context.user_data.get("schedule_search_term", ""),
+        "product_id": selected.get("product_id", ""),
+        "product_name": selected.get("name", ""),
+        "product_image": selected.get("image_url", ""),
+        "product_url": selected.get("product_url", ""),
+        "affiliate_link": selected.get("affiliate_link", ""),
+        "sale_price_usd": selected.get("sale_price_usd", ""),
+        "original_price_usd": selected.get("original_price_usd", ""),
+        "currency_usd": selected.get("currency_usd", "USD"),
+        "description_override": "",
+        "scheduled_time": schedule_utc_str,
+        "posted": False,
+        "fb_post_id": None,
+        "video_url": "",
+        "has_video": False,
+    }
+    config["scheduled_affiliate_posts"].append(new_post)
+    save_config(config)
+
+    context.user_data["awaiting_schedule_time"] = False
+    context.user_data["schedule_selected"] = None
+
+    await update.message.reply_text(
+        f"✅ *Scheduled!*\n\n"
+        f"🛍️ {new_post['product_name'][:60]}\n"
+        f"💰 ${new_post['sale_price_usd']}\n"
+        f"⏰ {schedule_utc_str} UTC\n"
+        f"📄 Page: {page.get('name', page['id'])}\n"
+        f"🆔 ID: `{new_post['id']}`",
+        parse_mode="Markdown",
+    )
 
 # ============ Bot lifecycle ============
 
@@ -205,4 +626,19 @@ def build_application(token: str) -> Application:
     app.add_handler(CommandHandler("queue", cmd_queue))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CommandHandler("post", cmd_post))
+    app.add_handler(CommandHandler("schedule", cmd_schedule))
+
+    # Callback handlers (buttons)
+    app.add_handler(CallbackQueryHandler(on_pick_product, pattern=r"^pick_"))
+    app.add_handler(CallbackQueryHandler(on_approve, pattern=r"^approve_"))
+    app.add_handler(CallbackQueryHandler(on_reject, pattern=r"^reject_"))
+    app.add_handler(CallbackQueryHandler(on_edit, pattern=r"^edit_"))
+
+    # Text handlers — order matters (edit → schedule → default)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_edit_text_reply), group=0)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_time_input), group=0)
+
+    global _bot_app
+    _bot_app = app
+
     return app
