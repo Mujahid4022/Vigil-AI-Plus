@@ -25,6 +25,77 @@ logger = logging.getLogger(__name__)
 # Global reference to the active bot application (set at startup)
 _bot_app = None
 
+# Alert cooldowns to prevent spam (event_key → last_sent_timestamp)
+_alert_cooldowns = {}
+COOLDOWN_SECONDS = 300  # 5 minutes between identical alerts
+
+
+async def send_alert(level: str, title: str, body: str, event_key: str = None):
+    """
+    Send a smart alert to the admin.
+    - level: 'info' | 'warning' | 'error' | 'success'
+    - title: short headline
+    - body: detail text
+    - event_key: deduplication key (same key won't fire twice within cooldown)
+    """
+    global _bot_app
+    if not _bot_app:
+        return
+
+    # Cooldown check
+    if event_key:
+        import time as _time
+        now = _time.time()
+        last = _alert_cooldowns.get(event_key, 0)
+        if now - last < COOLDOWN_SECONDS:
+            return  # Silently skip
+        _alert_cooldowns[event_key] = now
+
+    config = load_config()
+    authorized = config.get("authorized_telegram_users", [])
+    if not authorized:
+        return
+
+    admin_id = authorized[0]
+
+    emoji = {
+        "info": "ℹ️",
+        "warning": "⚠️",
+        "error": "🚨",
+        "success": "🏆",
+    }.get(level, "📢")
+
+    text = f"{emoji} *{title}*\n\n{body}"
+
+    try:
+        await _bot_app.bot.send_message(
+            chat_id=admin_id,
+            text=text[:4000],
+            parse_mode="Markdown",
+        )
+        print(f"📤 Alert sent: {title}")
+    except Exception as e:
+        logger.warning(f"Failed to send alert: {e}")
+
+
+def notify_alert_sync(level: str, title: str, body: str, event_key: str = None):
+    """Sync wrapper — callable from non-async code (engines)."""
+    try:
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            return  # No event loop, skip
+        if loop.is_running():
+            asyncio.run_coroutine_threadsafe(
+                send_alert(level, title, body, event_key),
+                loop,
+            )
+        else:
+            loop.run_until_complete(send_alert(level, title, body, event_key))
+    except Exception as e:
+        print(f"⚠️ notify_alert_sync failed: {e}")
+
 PENDING_DIR = os.path.join("data", "pending")
 os.makedirs(PENDING_DIR, exist_ok=True)
 
