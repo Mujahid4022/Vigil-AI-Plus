@@ -151,7 +151,7 @@ async def send_draft_notification(post_id: str, page_name: str, caption: str, im
     except Exception as e:
         logger.exception(f"Failed to send draft notification: {e}")
 
-CONFIG_FILE = "config.json"
+CONFIG_FILE = os.environ.get("CONFIG_DATA_PATH", "config.json")
 
 
 # ============ Helpers ============
@@ -567,7 +567,7 @@ async def cmd_schedule(update, context):
 
 
 async def on_pick_product(update, context):
-    """Handle product selection from inline button."""
+    """Handle product selection — then ask which page."""
     query = update.callback_query
     await query.answer()
 
@@ -587,8 +587,50 @@ async def on_pick_product(update, context):
     name = selected.get("name", "Product")[:60]
     price = selected.get("sale_price_usd", "N/A")
 
+    # Load pages
+    config = load_config()
+    pages = config.get("pages", [])
+    if not pages:
+        context.user_data["awaiting_schedule_time"] = False
+        return await query.edit_message_text("❌ No Facebook pages configured.")
+
+    # Build page buttons
+    keyboard = []
+    for i, p in enumerate(pages):
+        pname = p.get("name") or p.get("id")
+        keyboard.append([InlineKeyboardButton(f"📄 {pname}", callback_data=f"page_{i}")])
+
     await query.edit_message_text(
         f"✅ Selected: *{name}*\n💰 ${price}\n\n"
+        f"📄 Which page should I post to?",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown",
+    )
+
+async def on_pick_page(update, context):
+    """Handle page selection — then ask for time."""
+    query = update.callback_query
+    await query.answer()
+
+    if not is_authorized(update):
+        return await query.edit_message_text("🚫 Unauthorized.")
+
+    idx = int(query.data.split("_")[1])
+    config = load_config()
+    pages = config.get("pages", [])
+    if idx >= len(pages):
+        return await query.edit_message_text("❌ Page no longer available.")
+
+    page = pages[idx]
+    context.user_data["schedule_page"] = page
+    selected = context.user_data.get("schedule_selected", {})
+    name = selected.get("name", "Product")[:60]
+    price = selected.get("sale_price_usd", "N/A")
+
+    await query.edit_message_text(
+        f"✅ Selected: *{name}*\n"
+        f"💰 ${price}\n"
+        f"📄 Page: *{page.get('name') or page.get('id')}*\n\n"
         f"⏰ When should I schedule it?\n"
         f"Reply with a duration, e.g.:\n"
         f"• `30m` — 30 minutes\n"
@@ -598,7 +640,6 @@ async def on_pick_product(update, context):
     )
 
     context.user_data["awaiting_schedule_time"] = True
-
 
 async def on_time_input(update, context):
     """Handle the time reply (only fires when awaiting_schedule_time is True)."""
@@ -640,12 +681,11 @@ async def on_time_input(update, context):
     if "scheduled_affiliate_posts" not in config:
         config["scheduled_affiliate_posts"] = []
 
-    pages = config.get("pages", [])
-    if not pages:
+    # Use the page the user selected
+    page = context.user_data.get("schedule_page")
+    if not page:
         context.user_data["awaiting_schedule_time"] = False
-        return await update.message.reply_text("❌ No Facebook pages configured.")
-
-    page = pages[0]
+        return await update.message.reply_text("❌ No page selected. Start with /schedule.")
 
     new_post = {
         "id": str(uuid.uuid4())[:8],
@@ -672,6 +712,7 @@ async def on_time_input(update, context):
 
     context.user_data["awaiting_schedule_time"] = False
     context.user_data["schedule_selected"] = None
+    context.user_data["schedule_page"] = None
 
     await update.message.reply_text(
         f"✅ *Scheduled!*\n\n"
@@ -714,6 +755,7 @@ def build_application(token: str) -> Application:
 
     # Callback handlers (buttons)
     app.add_handler(CallbackQueryHandler(on_pick_product, pattern=r"^pick_"))
+    app.add_handler(CallbackQueryHandler(on_pick_page, pattern=r"^page_"))
     app.add_handler(CallbackQueryHandler(on_approve, pattern=r"^approve_"))
     app.add_handler(CallbackQueryHandler(on_reject, pattern=r"^reject_"))
     app.add_handler(CallbackQueryHandler(on_edit, pattern=r"^edit_"))
