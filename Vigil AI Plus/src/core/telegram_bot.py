@@ -508,7 +508,7 @@ async def on_edit_text_reply(update, context):
 # ============ /schedule workflow ============
 
 async def cmd_schedule(update, context):
-    """Start product scheduling: /schedule watch"""
+    """Start product scheduling: /schedule watch (with image previews + pagination)"""
     if not is_authorized(update):
         return await deny(update)
 
@@ -520,50 +520,160 @@ async def cmd_schedule(update, context):
         )
 
     search_term = " ".join(args)
-    await update.message.reply_text(
+    status_msg = await update.message.reply_text(
         f"🔍 Searching AliExpress for: *{search_term}*...",
         parse_mode="Markdown",
     )
 
     try:
         from src.utils.affiliate_api import search_products
-
         config = load_config()
         providers = config.get("affiliate_providers", [])
         if not providers:
-            return await update.message.reply_text("❌ No affiliate providers configured.")
+            return await status_msg.edit_text("❌ No affiliate providers configured.")
 
         provider = providers[0]
-
         loop = asyncio.get_event_loop()
         products = await loop.run_in_executor(None, search_products, provider, search_term)
 
         if not products:
-            return await update.message.reply_text(f"❌ No products found for '{search_term}'.")
+            return await status_msg.edit_text(f"❌ No products found for '{search_term}'.")
 
-        top5 = products[:5]
-
-        context.user_data["schedule_products"] = top5
+        # Store ALL products (up to 15) for pagination
+        context.user_data["schedule_products"] = products[:15]
         context.user_data["schedule_search_term"] = search_term
+        context.user_data["schedule_page"] = 0
 
-        text = f"📦 Found {len(products)} products. Top 5:\n\n"
-        keyboard = []
-        for i, p in enumerate(top5):
-            name = p.get("name", "Product")[:50]
-            price = p.get("sale_price_usd", "N/A")
-            text += f"*{i+1}.* {name}\n💰 ${price}\n\n"
-            keyboard.append([InlineKeyboardButton(f"{i+1}. {name[:40]}", callback_data=f"pick_{i}")])
-
-        text += "👇 Tap a product to schedule it:"
-        await update.message.reply_text(
-            text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown",
+        await status_msg.edit_text(
+            f"📦 Found {len(products)} products. Showing first 5 below 👇"
         )
+
+        # Send first page (products 0-4)
+        await _send_product_page(update, context, page_idx=0)
 
     except Exception as e:
         logger.exception(f"Schedule search failed: {e}")
-        await update.message.reply_text(f"❌ Search failed: {e}")
+        await status_msg.edit_text(f"❌ Search failed: {e}")
+
+
+async def _send_product_page(update_or_query, context, page_idx: int):
+    """Send 5 products with images + a Next button if more available."""
+    products = context.user_data.get("schedule_products", [])
+    if not products:
+        return
+
+    start = page_idx * 5
+    end = start + 5
+    page_products = products[start:end]
+
+    # Determine chat target
+    if hasattr(update_or_query, "message") and update_or_query.message:
+        chat = update_or_query.message
+    elif hasattr(update_or_query, "reply_photo"):
+        chat = update_or_query
+    else:
+        chat = update_or_query
+
+    for i, p in enumerate(page_products):
+        global_idx = start + i
+        name = (p.get("name") or "Product")[:120]
+        price = p.get("sale_price_usd", "N/A")
+        image_url = p.get("image_url", "")
+        caption = f"*{global_idx + 1}.* {name}\n💰 ${price}"
+
+        keyboard = [[
+            InlineKeyboardButton(
+                f"✅ Select #{global_idx + 1}",
+                callback_data=f"pick_{global_idx}"
+            )
+        ]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        try:
+            if image_url:
+                await chat.reply_photo(
+                    photo=image_url,
+                    caption=caption,
+                    parse_mode="Markdown",
+                    reply_markup=reply_markup,
+                )
+            else:
+                await chat.reply_text(
+                    caption,
+                    parse_mode="Markdown",
+                    reply_markup=reply_markup,
+                )
+        except Exception as img_err:
+            print(f"⚠️ Photo failed for product {global_idx}: {img_err}")
+            await chat.reply_text(
+                caption,
+                parse_mode="Markdown",
+                reply_markup=reply_markup,
+            )
+
+    # ---- Send nav buttons if there are more ----
+    has_more = end < len(products)
+    if has_more:
+        next_page_idx = page_idx + 1
+        nav_keyboard = [[
+            InlineKeyboardButton(
+                "⬅️ Previous 5" if page_idx > 0 else "❌ Cancel",
+                callback_data=f"spage_{page_idx - 1}" if page_idx > 0 else "spage_cancel"
+            ),
+            InlineKeyboardButton(
+                "Next 5 ➡️",
+                callback_data=f"spage_{next_page_idx}"
+            ),
+        ]]
+        await chat.reply_text(
+            f"📄 Showing {start + 1}–{end} of {len(products)}",
+            reply_markup=InlineKeyboardMarkup(nav_keyboard),
+        )
+    else:
+        if page_idx > 0:
+            nav_keyboard = [[
+                InlineKeyboardButton(
+                    "⬅️ Previous 5",
+                    callback_data=f"spage_{page_idx - 1}"
+                )
+            ]]
+            await chat.reply_text(
+                f"📄 Showing {start + 1}–{len(products)} of {len(products)} (end)",
+                reply_markup=InlineKeyboardMarkup(nav_keyboard),
+            )
+        else:
+            await chat.reply_text(
+                f"📄 Showing {start + 1}–{len(products)} of {len(products)} (end)"
+            )
+
+
+async def on_schedule_page(update, context):
+    """Handle pagination buttons (Next 5 / Previous 5 / Cancel)."""
+    query = update.callback_query
+    await query.answer()
+
+    if not is_authorized(update):
+        return
+
+    data = query.data
+
+    if data == "spage_cancel":
+        context.user_data["schedule_products"] = None
+        await query.edit_message_text("❌ Browse cancelled. Use /schedule to start again.")
+        return
+
+    try:
+        page_idx = int(data.replace("spage_", ""))
+    except ValueError:
+        return
+
+    if page_idx < 0:
+        return
+
+    await query.edit_message_text(f"📄 Loading page {page_idx + 1}...")
+
+    await _send_product_page(update.effective_chat, context, page_idx=page_idx)
+    context.user_data["schedule_page"] = page_idx
 
 
 async def on_pick_product(update, context):
@@ -755,6 +865,7 @@ def build_application(token: str) -> Application:
 
     # Callback handlers (buttons)
     app.add_handler(CallbackQueryHandler(on_pick_product, pattern=r"^pick_"))
+    app.add_handler(CallbackQueryHandler(on_schedule_page, pattern=r"^spage_"))
     app.add_handler(CallbackQueryHandler(on_pick_page, pattern=r"^page_"))
     app.add_handler(CallbackQueryHandler(on_approve, pattern=r"^approve_"))
     app.add_handler(CallbackQueryHandler(on_reject, pattern=r"^reject_"))
