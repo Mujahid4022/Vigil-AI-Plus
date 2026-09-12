@@ -16,7 +16,10 @@
       "video_url": "product_video_url",
       "price": "target_sale_price",
       "currency": "target_sale_price_currency",
-      "image_url": "product_small_image_urls.string.0",
+      "image_url": [
+          "product_main_image_url",
+          "product_small_image_urls.string.0"
+      ],
       "product_url": "product_detail_url",
       "affiliate_link": "promotion_link",
       "sale_price_usd": "target_sale_price",

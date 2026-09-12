@@ -18,6 +18,16 @@ from typing import Dict, Any, List, Optional
 # 1. HELPER FUNCTIONS
 # ======================================================================
 
+def _extract_image_url(item, path_spec):
+    """Extract image URL, trying multiple paths in priority order (list or string)."""
+    if isinstance(path_spec, list):
+        for path in path_spec:
+            val = get_nested_value(item, path, "")
+            if val and isinstance(val, str) and val.strip():
+                return val
+        return ""
+    return get_nested_value(item, path_spec, "")
+
 def get_nested_value(data: Any, path: str, default: Any = "") -> Any:
     """
     Extract nested value using dot notation.
@@ -342,7 +352,7 @@ def call_generic_api(provider: Dict[str, Any], search_term: str, page_no: int = 
             "price": get_nested_value(item, mapping.get("price", "price"), "N/A"),
             "currency": get_nested_value(item, mapping.get("currency", "currency"), "USD"),
             "description": get_nested_value(item, mapping.get("description", "description"), "")[:500],
-            "image_url": get_nested_value(item, mapping.get("image_url", "image_url"), ""),
+            "image_url": _extract_image_url(item, mapping.get("image_url", "image_url")),
             "product_url": get_nested_value(item, mapping.get("product_url", "product_url"), ""),
             "category": get_nested_value(item, mapping.get("category", "category"), ""),
             "brand": get_nested_value(item, mapping.get("brand", "brand"), ""),
