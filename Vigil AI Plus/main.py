@@ -122,15 +122,19 @@ scheduler = BackgroundScheduler(timezone="UTC")
 
 
 def scheduled_tick():
-    """Runs every 60 seconds – posts due content for each page and processes affiliate queue."""
     if BOT_PAUSED:
         print("⏸️ Bot is paused. Skipping tick.")
         return
 
+    # ---- 1. PROCESS AFFILIATE POSTS FIRST (fast, time-sensitive) ----
+    try:
+        process_affiliate_posts()
+    except Exception as e:
+        print(f"❌ Affiliate processing error: {e}")
+
     try:
         from src.engines.engine_1_urdu_poetry import run_engine_1
         from src.engines.engine_2_deals import run_engine_2
-        from src.engines.engine_engagement import run_engagement
     except Exception as e:
         print(f"⚠️ Could not import engines: {e}")
         return
@@ -155,20 +159,25 @@ def scheduled_tick():
             except Exception as e:
                 print(f"❌ Engine error for page {p['id']}: {e}")
 
-        # ---- Engagement Logic (once per 24h) ----
-        engagement_interval = 24 * 3600
-        if (now - p.get("last_engagement", 0)) > engagement_interval:
+def run_engagement_all_pages():
+    """Run engagement for all pages once every 24h (separate from main tick)."""
+    try:
+        from src.engines.engine_engagement import run_engagement
+    except Exception as e:
+        print(f"⚠️ Could not import engagement: {e}")
+        return
+
+    config = load_config()
+    now = time.time()
+
+    for p in config.get("pages", []):
+        try:
             print(f"🤝 Running engagement for {p['id']}")
-            try:
-                run_engagement(p)
-                p["last_engagement"] = now
-                save_config(config)
-            except Exception as e:
-                print(f"❌ Engagement error for page {p['id']}: {e}")
-
-    # ---- Process Scheduled Affiliate Posts ----
-    process_affiliate_posts()
-
+            run_engagement(p)
+            p["last_engagement"] = now
+            save_config(config)
+        except Exception as e:
+            print(f"❌ Engagement error for page {p['id']}: {e}")
 
 def process_affiliate_posts():
     """Check and publish due affiliate posts."""
@@ -395,7 +404,17 @@ async def lifespan(app: FastAPI):
         seconds=60,
         id="vigil_tick",
         replace_existing=True,
+        max_instances=1,
     )
+
+    scheduler.add_job(
+        run_engagement_all_pages,
+        "interval",
+        hours=24,
+        id="engagement_job",
+        replace_existing=True,
+    )
+
     scheduler.start()
     print("✅ APScheduler started (every 60s).")
 
