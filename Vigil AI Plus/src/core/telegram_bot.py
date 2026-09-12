@@ -682,14 +682,18 @@ async def on_pick_product(update, context):
     await query.answer()
 
     if not is_authorized(update):
-        return await query.edit_message_text("🚫 Unauthorized.")
+        return
 
     data = query.data
     idx = int(data.split("_")[1])
 
     products = context.user_data.get("schedule_products", [])
     if idx >= len(products):
-        return await query.edit_message_text("❌ Product no longer available. Try /schedule again.")
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="❌ Product no longer available. Try /schedule again.",
+        )
+        return
 
     selected = products[idx]
     context.user_data["schedule_selected"] = selected
@@ -702,7 +706,11 @@ async def on_pick_product(update, context):
     pages = config.get("pages", [])
     if not pages:
         context.user_data["awaiting_schedule_time"] = False
-        return await query.edit_message_text("❌ No Facebook pages configured.")
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="❌ No Facebook pages configured.",
+        )
+        return
 
     # Build page buttons
     keyboard = []
@@ -710,9 +718,14 @@ async def on_pick_product(update, context):
         pname = p.get("name") or p.get("id")
         keyboard.append([InlineKeyboardButton(f"📄 {pname}", callback_data=f"page_{i}")])
 
-    await query.edit_message_text(
-        f"✅ Selected: *{name}*\n💰 ${price}\n\n"
-        f"📄 Which page should I post to?",
+    # Send a NEW message (do NOT edit the photo message)
+    await context.bot.send_message(
+        chat_id=query.message.chat_id,
+        text=(
+            f"✅ Selected: *{name}*\n"
+            f"💰 ${price}\n\n"
+            f"📄 Which page should I post to?"
+        ),
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown",
     )
