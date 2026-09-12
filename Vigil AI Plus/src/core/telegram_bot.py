@@ -683,6 +683,19 @@ async def on_time_input(update, context):
         parse_mode="Markdown",
     )
 
+async def on_text_input(update, context):
+    """Unified text handler — dispatches based on current state."""
+    # Priority 1: Editing a draft?
+    if context.user_data.get("editing_draft_id"):
+        return await on_edit_text_reply(update, context)
+
+    # Priority 2: Awaiting schedule time?
+    if context.user_data.get("awaiting_schedule_time"):
+        return await on_time_input(update, context)
+
+    # Otherwise: ignore silently (don't spam the user)
+    return
+
 # ============ Bot lifecycle ============
 
 def build_application(token: str) -> Application:
@@ -705,9 +718,8 @@ def build_application(token: str) -> Application:
     app.add_handler(CallbackQueryHandler(on_reject, pattern=r"^reject_"))
     app.add_handler(CallbackQueryHandler(on_edit, pattern=r"^edit_"))
 
-    # Text handlers — order matters (edit → schedule → default)
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_edit_text_reply), group=0)
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_time_input), group=0)
+    # Single unified text handler (dispatches based on state)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text_input))
 
     global _bot_app
     _bot_app = app
