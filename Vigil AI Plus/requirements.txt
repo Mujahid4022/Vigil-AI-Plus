@@ -22,3 +22,4 @@ mistralai
 
 # Telegram
 python-telegram-bot
+gtts
