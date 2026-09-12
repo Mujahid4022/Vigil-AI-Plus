@@ -189,6 +189,71 @@ async def deny(update: Update):
 
 # ============ Commands ============
 
+def detect_language(text: str) -> str:
+    """
+    Fast language detector. Returns 'ur' or 'en'.
+    Uses Unicode range for Urdu script + Roman Urdu keyword matching.
+    """
+    if not text:
+        return "en"
+
+    # 1. Check for Urdu script characters (ا ب پ ت ٹ ث ج چ ح خ د ڈ ذ ر ڑ ز ژ س ش ص ض ط ظ ع غ ف ق ک گ ل م ن و ہ ھ ی ے)
+    urdu_range = re.compile(r'[\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFF]')
+    if urdu_range.search(text):
+        return "ur"
+
+    # 2. Check for Roman Urdu keywords (common verbs/words)
+    roman_urdu_keywords = [
+        "dikhao", "dekho", "dekha", "karo", "kro", "kar", "kya", "kya hai",
+        "kaise", "kaisay", "kahan", "kab", "kyun", "kyunkay", "kyunke",
+        "haan", "nahi", "nahin", "theek", "theek hai", "phir", "abhi",
+        "ab", "kal", "aaj", "aur", "ke", "ka", "ki", "se", "ko",
+        "mein", "main", "hum", "tum", "aap", "aapka", "mera", "meri",
+        "batao", "bata", "suno", "sun", "chalo", "chal", "ruko", "ruk",
+        "schedule", "post", "queue", "status",
+    ]
+    text_lower = text.lower()
+    urdu_hits = sum(1 for kw in roman_urdu_keywords if f" {kw} " in f" {text_lower} ")
+
+    # If 2+ Roman Urdu keywords found → treat as Urdu
+    if urdu_hits >= 2:
+        return "ur"
+
+    # 3. Default to English
+    return "en"
+
+async def cmd_lang(update, context):
+    """Manually set reply language: /lang ur, /lang en, /lang auto"""
+    if not is_authorized(update):
+        return await deny(update)
+
+    args = context.args
+    if not args:
+        current = context.user_data.get("reply_language", "en")
+        forced = context.user_data.get("forced_language", None)
+        return await update.message.reply_text(
+            f"🌐 Current reply language: *{current}*\n"
+            f"Forced: *{forced or 'no (auto-detect)'}*\n\n"
+            f"Usage:\n"
+            f"• `/lang ur` — force Urdu replies\n"
+            f"• `/lang en` — force English replies\n"
+            f"• `/lang auto` — back to auto-detect",
+            parse_mode="Markdown"
+        )
+
+    choice = args[0].lower().strip()
+
+    if choice == "auto":
+        context.user_data["forced_language"] = None
+        return await update.message.reply_text("✅ Language set to auto-detect.")
+
+    if choice not in ("ur", "en"):
+        return await update.message.reply_text("❌ Use `/lang ur`, `/lang en`, or `/lang auto`.")
+
+    context.user_data["forced_language"] = choice
+    context.user_data["reply_language"] = choice
+    await update.message.reply_text(f"✅ Language forced to `{choice}`.")
+
 async def cmd_start(update, context):
     if not is_authorized(update):
         return await deny(update)
@@ -988,7 +1053,18 @@ async def on_time_input(update, context):
     )
 
 async def on_text_input(update, context):
-    """Unified text handler — dispatches based on current state."""
+    """Unified text handler — detects language, then dispatches based on state."""
+    # Text input → don't send voice reply (voice flag off)
+    context.user_data["last_input_was_voice"] = False
+
+    # Detect language of this message and store for reply
+    try:
+        detected = detect_language(update.message.text or "")
+        context.user_data["reply_language"] = detected
+        print(f"🌐 Text language detected: {detected}")
+    except Exception as e:
+        print(f"⚠️ Language detect failed: {e}")
+
     # Priority 1: Editing a draft?
     if context.user_data.get("editing_draft_id"):
         return await on_edit_text_reply(update, context)
@@ -997,7 +1073,7 @@ async def on_text_input(update, context):
     if context.user_data.get("awaiting_schedule_time"):
         return await on_time_input(update, context)
 
-    # Otherwise: ignore silently (don't spam the user)
+    # Otherwise: ignore silently
     return
 
 # ============ Voice command support ============
@@ -1053,11 +1129,18 @@ async def on_voice_message(update, context):
         )
 
     text = result["text"]
-    lang = result["language"]
+    whisper_lang = result["language"]   # Groq's guess (may be wrong)
+
+    # Parse intent — LLM will also tell us the real language
+    intent = await _parse_voice_intent(text, whisper_lang)
+
+    # Prefer the LLM's language detection over Groq's
+    llm_lang = intent.get("language") if intent else None
+    lang = llm_lang or whisper_lang or "en"
+
+    print(f"🌐 Language: whisper={whisper_lang}, llm={llm_lang}, using={lang}")
     context.user_data["reply_language"] = lang
 
-    # Parse intent
-    intent = await _parse_voice_intent(text, lang)
     if not intent or intent.get("intent") == "unknown":
         return await smart_reply(
             update, context,
@@ -1072,11 +1155,10 @@ async def on_voice_message(update, context):
 
 
 async def _parse_voice_intent(text, lang):
-    """Use LLM to extract intent + parameters from transcribed text."""
+    """Use LLM to extract intent + parameters + correct language."""
     prompt = f"""You are a command parser for a Facebook automation bot.
 
 User said (may contain transcription errors): "{text}"
-Detected language: {lang}
 
 Available intents:
 - schedule_product (needs: search_term) — user wants to schedule a product to post
@@ -1089,8 +1171,16 @@ Available intents:
 - cancel_post (needs: post_id) — cancel a scheduled post
 
 Respond ONLY with valid JSON, no extra text.
-Example: {{"intent": "schedule_product", "search_term": "watch"}}
-If no intent matches, return: {{"intent": "unknown"}}"""
+Also detect the language of the user's speech:
+- If the text is in Urdu script (اردو) → language = "ur"
+- If the text is Roman Urdu (Urdu words in English letters, e.g. "status dikhao", "queue dekho", "pause karo", "teen ghante") → language = "ur"
+- If the text is pure English → language = "en"
+
+Examples:
+{{"intent": "bot_status", "language": "ur"}}
+{{"intent": "pause_bot", "language": "en"}}
+{{"intent": "schedule_product", "search_term": "watch", "language": "ur"}}
+{{"intent": "unknown", "language": "en"}}"""
 
     # Use Groq
     try:
@@ -1222,6 +1312,7 @@ def build_application(token: str) -> Application:
     app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CommandHandler("post", cmd_post))
     app.add_handler(CommandHandler("schedule", cmd_schedule))
+    app.add_handler(CommandHandler("lang", cmd_lang))
 
     # Callback handlers (buttons)
     app.add_handler(CallbackQueryHandler(on_pick_provider, pattern=r"^provider_"))
