@@ -236,7 +236,7 @@ async def cmd_status(update, context):
             f"Pages: {len(pages)}\n"
             f"Scheduled: {len(scheduled)} affiliate posts"
         )
-    await update.message.reply_text(text, parse_mode="Markdown")
+    await smart_reply(update, context, text)
 
 
 async def cmd_pause(update, context):
@@ -245,7 +245,8 @@ async def cmd_pause(update, context):
     main = get_main_module()
     main.BOT_PAUSED = True
     lang = context.user_data.get("reply_language", "en")
-    await update.message.reply_text(
+    await smart_reply(
+        update, context,
         _lang_text(lang,
             "⏸️ Bot paused. No posts will be published until /resume.",
             "⏸️ بوٹ روک دیا گیا۔ دوبارہ شروع کرنے تک کوئی پوسٹ نہیں ہوگی۔"
@@ -259,7 +260,8 @@ async def cmd_resume(update, context):
     main = get_main_module()
     main.BOT_PAUSED = False
     lang = context.user_data.get("reply_language", "en")
-    await update.message.reply_text(
+    await smart_reply(
+        update, context,
         _lang_text(lang,
             "▶️ Bot resumed. Scheduler will tick at the next minute mark.",
             "▶️ بوٹ دوبارہ چل پڑا۔ اگلے منٹ میں شیڈیولر کام کرے گا۔"
@@ -272,17 +274,27 @@ async def cmd_pages(update, context):
         return await deny(update)
     config = load_config()
     pages = config.get("pages", [])
-    if not pages:
-        return await update.message.reply_text("📭 No pages connected yet.")
+    lang = context.user_data.get("reply_language", "en")
 
-    text = "📋 *Connected Pages*\n\n"
+    if not pages:
+        return await smart_reply(
+            update, context,
+            _lang_text(lang, "📭 No pages connected yet.", "📭 ابھی کوئی صفحہ منسلک نہیں ہے۔")
+        )
+
+    if lang.startswith("ur"):
+        text = "📋 *منسلک صفحات*\n\n"
+    else:
+        text = "📋 *Connected Pages*\n\n"
+
     for i, p in enumerate(pages, 1):
         name = p.get("name") or p.get("id")
         pid = p.get("id")
         interval = p.get("interval", 2)
-        lang = p.get("language", "Urdu")
-        text += f"{i}. *{name}*\n   ID: `{pid}`\n   Every {interval}h | {lang}\n\n"
-    await update.message.reply_text(text, parse_mode="Markdown")
+        plang = p.get("language", "Urdu")
+        text += f"{i}. *{name}*\n   ID: `{pid}`\n   Every {interval}h | {plang}\n\n"
+
+    await smart_reply(update, context, text)
 
 
 async def cmd_queue(update, context):
@@ -290,15 +302,25 @@ async def cmd_queue(update, context):
         return await deny(update)
     config = load_config()
     scheduled = [p for p in config.get("scheduled_affiliate_posts", []) if not p.get("posted")]
-    if not scheduled:
-        return await update.message.reply_text("📭 Queue is empty.")
+    lang = context.user_data.get("reply_language", "en")
 
-    text = f"📋 *Scheduled Posts* ({len(scheduled)})\n\n"
+    if not scheduled:
+        return await smart_reply(
+            update, context,
+            _lang_text(lang, "📭 Queue is empty.", "📭 قطار خالی ہے۔")
+        )
+
+    if lang.startswith("ur"):
+        text = f"📋 *شیڈول شدہ پوسٹس* ({len(scheduled)})\n\n"
+    else:
+        text = f"📋 *Scheduled Posts* ({len(scheduled)})\n\n"
+
     for p in scheduled:
         name = (p.get("product_name") or "Unknown")[:50]
         time = p.get("scheduled_time", "")
         text += f"🆔 `{p.get('id')}`\n📦 {name}\n⏰ {time} UTC\n\n"
-    await update.message.reply_text(text, parse_mode="Markdown")
+
+    await smart_reply(update, context, text)
 
 
 async def cmd_cancel(update, context):
@@ -988,7 +1010,7 @@ def _lang_text(lang: str, en_text: str, ur_text: str) -> str:
 
 
 async def on_voice_message(update, context):
-    """Handle voice notes — transcribe + parse intent + route to command."""
+    """Handle voice notes — transcribe + parse + execute + reply with voice + text."""
     if not is_authorized(update):
         return await deny(update)
 
@@ -1005,45 +1027,47 @@ async def on_voice_message(update, context):
     except Exception as e:
         return await update.message.reply_text(f"❌ Could not download voice: {e}")
 
-    # Acknowledge
+    # Acknowledge (voice + text)
+    context.user_data["last_input_was_voice"] = True
     await update.message.reply_text("🎤 Transcribing...")
 
-    # Transcribe using configured STT provider
+    # Transcribe
     from src.utils.voice_processor import transcribe_voice
     config = load_config()
     stt_provider = config.get("stt_provider", "groq")
 
     result = await transcribe_voice(tmp_path, provider_name=stt_provider, language=None)
 
-    # Clean up temp file
+    # Cleanup
     try:
         os.remove(tmp_path)
     except Exception:
         pass
 
     if not result or not result.get("text"):
-        return await update.message.reply_text(
+        context.user_data["reply_language"] = "en"
+        return await smart_reply(
+            update, context,
             "❌ Could not understand the voice note. Please try again.\n"
-            "❌ آواز سمجھ نہیں آئی۔ دوبارہ کوشش کریں۔"
+            "❌ آواز سمجھ نہیں آئی۔ دوبارہ کوشش کریں۔",
         )
 
     text = result["text"]
     lang = result["language"]
-
-    # Store language for future replies in this session
     context.user_data["reply_language"] = lang
 
-    # Parse intent with LLM
+    # Parse intent
     intent = await _parse_voice_intent(text, lang)
     if not intent or intent.get("intent") == "unknown":
-        return await update.message.reply_text(
+        return await smart_reply(
+            update, context,
             _lang_text(lang,
                 f"🎤 Heard: _{text}_\n\n❌ No matching command.",
                 f"🎤 سنا: _{text}_\n\n❌ کوئی کمانڈ نہیں ملی۔"
-            ),
-            parse_mode="Markdown"
+            )
         )
 
+    # Route intent — but use a special flag so cmd_* helpers know to reply via voice
     await _execute_voice_intent(intent, update, context, text, lang)
 
 
@@ -1090,13 +1114,22 @@ If no intent matches, return: {{"intent": "unknown"}}"""
 
 
 async def _execute_voice_intent(intent, update, context, raw_text, lang):
-    """Route parsed intent to existing command handlers."""
+    """Route parsed intent to existing command handlers (they'll send text+voice)."""
     intent_type = intent.get("intent", "unknown")
+
+    # The command handlers below were written for TEXT input.
+    # We bypass their direct reply_text by wrapping them.
+    # Since they call update.message.reply_text directly, we temporarily
+    # patch it to also fire TTS.
+
+    # Simplest approach: let them run, then send a follow-up voice.
+    # We do a two-pass: run the handler, then send voice of the SAME text.
 
     if intent_type == "schedule_product":
         search_term = (intent.get("search_term") or "").strip()
         if not search_term:
-            return await update.message.reply_text(
+            return await smart_reply(
+                update, context,
                 _lang_text(lang, "❌ No product name detected.", "❌ پروڈکٹ کا نام نہیں ملا۔")
             )
         context.args = search_term.split()
@@ -1125,15 +1158,54 @@ async def _execute_voice_intent(intent, update, context, raw_text, lang):
         if post_id:
             context.args = [post_id]
             return await cmd_cancel(update, context)
-        return await update.message.reply_text("❌ No post ID detected.")
+        return await smart_reply(update, context, "❌ No post ID detected.")
 
-    return await update.message.reply_text(
+    return await smart_reply(
+        update, context,
         _lang_text(lang,
             f"🎤 Heard: _{raw_text}_\n\n❌ Unknown command.",
             f"🎤 سنا: _{raw_text}_\n\n❌ نامعلوم کمانڈ۔"
-        ),
-        parse_mode="Markdown"
+        )
     )
+# ============ Voice reply helpers ============
+
+async def smart_reply(update, context, text: str, force_voice: bool = None):
+    """
+    Send a reply. If last input was voice, also send TTS voice note.
+    Language is taken from context.user_data['reply_language'].
+    """
+    lang = context.user_data.get("reply_language", "en")
+    last_was_voice = context.user_data.get("last_input_was_voice", False)
+
+    should_send_voice = last_was_voice if force_voice is None else force_voice
+
+    # Always send text
+    try:
+        await update.message.reply_text(text, parse_mode="Markdown")
+    except Exception:
+        await update.message.reply_text(text)  # fallback if markdown breaks
+
+    # Optionally send voice
+    if should_send_voice:
+        try:
+            from src.utils.tts_processor import synthesize_speech
+            config = load_config()
+            tts_provider = config.get("tts_provider", "gtts")
+
+            audio_path = synthesize_speech(text, language=lang, provider_name=tts_provider)
+
+            if audio_path and os.path.exists(audio_path):
+                with open(audio_path, "rb") as audio:
+                    await update.message.reply_voice(voice=audio)
+                # Cleanup
+                try:
+                    os.remove(audio_path)
+                except Exception:
+                    pass
+            else:
+                print("⚠️ TTS returned no audio file")
+        except Exception as e:
+            print(f"⚠️ Voice reply failed: {e}")
 
 # ============ Bot lifecycle ============
 
