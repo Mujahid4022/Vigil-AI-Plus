@@ -221,8 +221,7 @@ def process_affiliate_posts():
 
 
 def post_affiliate_product(scheduled_post, page):
-    """Generate post text with AI and publish to Facebook."""
-    from src.utils.affiliate_api import search_products
+    """Generate post text with AI and publish to Facebook (uses stored data, no re-fetch)."""
     from src.core.facebook_client import (
         post_to_facebook,
         post_video_to_facebook,
@@ -230,38 +229,137 @@ def post_affiliate_product(scheduled_post, page):
     )
     from src.engines.engine_1_urdu_poetry import log_performance
 
-    config = load_config()
+    # ---- Read product data DIRECTLY from scheduled_post (no re-fetch) ----
+    product_id = scheduled_post.get("product_id", "")
+    product_name = scheduled_post.get("product_name", "Product")
+    product_image = scheduled_post.get("product_image", "")
+    product_url = scheduled_post.get("product_url", "")
+    affiliate_link = scheduled_post.get("affiliate_link") or product_url
+    video_url = scheduled_post.get("video_url", "")
 
-    # Find provider
-    provider = None
-    for p in config.get("affiliate_providers", []):
-        if p["nickname"] == scheduled_post["provider_name"]:
-            provider = p
-            break
+    sale_usd = scheduled_post.get("sale_price_usd", "")
+    original_usd = scheduled_post.get("original_price_usd", "")
+    currency_usd = scheduled_post.get("currency_usd", "USD")
+    description_override = scheduled_post.get("description_override", "")
 
-    if not provider:
-        print(f"❌ Provider '{scheduled_post['provider_name']}' not found.")
-        return None
+    # ---- Build price display ----
+    if sale_usd and original_usd:
+        try:
+            sale = float(sale_usd)
+            original = float(original_usd)
+            if original > 0:
+                discount = int(((original - sale) / original) * 100)
+                price_display = f"💰 DEAL: {discount}% OFF!\n🪙 Now only ${sale:.2f} — was ${original:.2f}"
+            else:
+                price_display = f"🪙 Now only ${sale:.2f}"
+        except Exception:
+            price_display = f"🪙 Now only ${sale_usd}"
+    elif sale_usd:
+        price_display = f"🪙 Now only ${sale_usd}"
+    else:
+        price_display = "💰 Great Deal Available!"
 
-    # Fetch products
-    products = search_products(provider, scheduled_post["search_term"])
-    if not products:
-        print(f"❌ No products found for '{scheduled_post['search_term']}'.")
-        return None
+    print(f"🎯 Product: {product_name}")
+    print(f"💰 Price: {price_display}")
+    print(f"🔍 DEBUG: video_url = {video_url}")
+    print(f"🔍 DEBUG: image_url = {product_image}")
 
-    # Find the specific product by ID
-    stored_product_id = scheduled_post.get("product_id")
-    product = None
-    if stored_product_id:
-        product = next(
-            (p for p in products if str(p.get("product_id", "")) == str(stored_product_id)),
-            None,
+    # ---- Build AI prompt ----
+    prompt = f"""
+You are a social media copywriter for a Facebook page.
+
+Page Brief: {page.get('brief', '')}
+
+Product Details:
+- Name: {product_name}
+- Description: {description_override or ''}
+- Price: {price_display}
+- Affiliate Link: {affiliate_link}
+
+Write a short, engaging Facebook post that promotes this product. Use emojis. Keep it under 200 words.
+The post should have:
+- A catchy headline
+- The price section (already provided)
+- Bullet points highlighting key features
+- A call to action
+- End with the affiliate link on a new line.
+- Do not include any extra text beyond the post.
+"""
+
+    # ---- Generate with AI ----
+    formatted_post = None
+    priority_list = page.get("provider_priority", "gemini").split(",")
+    priority_list = [p.strip() for p in priority_list if p.strip()]
+
+    for provider_name in priority_list:
+        api_key = get_api_key(provider_name)
+        if not api_key:
+            continue
+        try:
+            if provider_name == "groq":
+                from groq import Groq
+                model = get_model_name("groq") or "openai/gpt-oss-120b"
+                client = Groq(api_key=api_key)
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                formatted_post = response.choices[0].message.content
+                break
+            else:
+                from google import genai
+                model = get_model_name(provider_name) or "models/gemini-3.5-flash"
+                client = genai.Client(api_key=api_key)
+                response = client.models.generate_content(model=model, contents=prompt)
+                formatted_post = response.text.strip()
+                break
+        except Exception as e:
+            print(f"⚠️ AI provider {provider_name} failed: {e}")
+            continue
+
+    if not formatted_post:
+        formatted_post = f"""🔥 NEW DEAL ALERT! 🇵🇰
+
+🛍️ {product_name}
+{price_display}
+
+🔗 Grab it now: {affiliate_link}
+
+#DealAlert #Pakistan #Shopping"""
+
+    # ---- Post to Facebook ----
+    if video_url:
+        print(f"🎬 Posting video: {video_url[:100]}...")
+        post_id = post_video_to_facebook(
+            page_id=page["id"],
+            access_token=page["token"],
+            caption=formatted_post,
+            video_url=video_url,
         )
-    if not product:
-        print(f"⚠️ Product with ID {stored_product_id} not found. Using first product.")
-        product = products[0]
+    elif product_image:
+        print(f"📸 Posting image: {product_image[:100]}...")
+        post_id = post_to_facebook(
+            access_token=page["token"],
+            page_id=page["id"],
+            message=formatted_post,
+            image_url=product_image,
+        )
+    else:
+        post_id = post_to_facebook(
+            access_token=page["token"],
+            page_id=page["id"],
+            message=formatted_post,
+            image_url=None,
+        )
 
-    affiliate_link = product.get("affiliate_link") or product.get("product_url", "")
+    if post_id:
+        insights = get_post_insights(post_id, page["token"])
+        log_performance(post_id, insights, page["id"])
+        print(f"📊 Analytics logged for post: {post_id}")
+    else:
+        print("❌ No post ID returned.")
+
+    return post_id
 
     # Prices
     sale_usd = product.get("sale_price_usd", "N/A")
