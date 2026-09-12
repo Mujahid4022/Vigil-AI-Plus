@@ -508,7 +508,7 @@ async def on_edit_text_reply(update, context):
 # ============ /schedule workflow ============
 
 async def cmd_schedule(update, context):
-    """Start product scheduling: /schedule watch (with image previews + pagination)"""
+    """Start product scheduling: /schedule watch (provider → product → page → time)"""
     if not is_authorized(update):
         return await deny(update)
 
@@ -520,40 +520,117 @@ async def cmd_schedule(update, context):
         )
 
     search_term = " ".join(args)
-    status_msg = await update.message.reply_text(
-        f"🔍 Searching AliExpress for: *{search_term}*...",
+    context.user_data["pending_search_term"] = search_term
+
+    config = load_config()
+    providers = config.get("affiliate_providers", [])
+    if not providers:
+        return await update.message.reply_text("❌ No affiliate providers configured.")
+
+    # If only one provider, skip the picker and search directly
+    if len(providers) == 1:
+        await _do_schedule_search(update, context, providers[0], search_term)
+        return
+
+    # Show provider buttons
+    keyboard = []
+    for i, p in enumerate(providers):
+        pname = p.get("nickname") or p.get("provider_type") or f"Provider {i+1}"
+        keyboard.append([InlineKeyboardButton(
+            f"📦 {pname}",
+            callback_data=f"provider_{i}"
+        )])
+
+    await update.message.reply_text(
+        f"🔍 Search term: *{search_term}*\n\n📦 Which provider should I search?",
+        reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown",
     )
 
+
+def _get_chat_id(update_or_query):
+    """Extract chat_id from Update, CallbackQuery, or Message."""
+    if hasattr(update_or_query, "effective_chat") and update_or_query.effective_chat:
+        return update_or_query.effective_chat.id
+    if hasattr(update_or_query, "message") and update_or_query.message:
+        return update_or_query.message.chat_id
+    if hasattr(update_or_query, "chat_id"):
+        return update_or_query.chat_id
+    if hasattr(update_or_query, "id"):
+        return update_or_query.id
+    if hasattr(update_or_query, "chat") and update_or_query.chat:
+        return update_or_query.chat.id
+    return None
+
+
+async def _do_schedule_search(update_or_query, context, provider, search_term):
+    """Run search on given provider and send first product page."""
+    chat_id = _get_chat_id(update_or_query)
+    if not chat_id:
+        print("⚠️ _do_schedule_search: no chat_id")
+        return
+
     try:
         from src.utils.affiliate_api import search_products
-        config = load_config()
-        providers = config.get("affiliate_providers", [])
-        if not providers:
-            return await status_msg.edit_text("❌ No affiliate providers configured.")
-
-        provider = providers[0]
         loop = asyncio.get_event_loop()
         products = await loop.run_in_executor(None, search_products, provider, search_term)
 
         if not products:
-            return await status_msg.edit_text(f"❌ No products found for '{search_term}'.")
+            return await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"❌ No products found for '{search_term}'.",
+            )
 
-        # Store ALL products (up to 15) for pagination
         context.user_data["schedule_products"] = products[:15]
         context.user_data["schedule_search_term"] = search_term
         context.user_data["schedule_page"] = 0
+        context.user_data["awaiting_provider"] = provider.get("nickname") or provider.get("provider_type", "aliexpress")
 
-        await status_msg.edit_text(
-            f"📦 Found {len(products)} products. Showing first 5 below 👇"
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                f"📦 Found {len(products)} products on "
+                f"*{provider.get('nickname', 'provider')}*.\n"
+                f"Showing first 5 below 👇"
+            ),
+            parse_mode="Markdown",
         )
 
-        # Send first page (products 0-4)
-        await _send_product_page(update, context, page_idx=0)
+        await _send_product_page(update_or_query, context, page_idx=0)
 
     except Exception as e:
         logger.exception(f"Schedule search failed: {e}")
-        await status_msg.edit_text(f"❌ Search failed: {e}")
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"❌ Search failed: {e}",
+        )
+
+
+async def on_pick_provider(update, context):
+    """Handle provider selection — run search and show products."""
+    query = update.callback_query
+    await query.answer()
+
+    if not is_authorized(update):
+        return
+
+    idx = int(query.data.split("_")[1])
+    config = load_config()
+    providers = config.get("affiliate_providers", [])
+    if idx >= len(providers):
+        return await query.edit_message_text("❌ Provider not found.")
+
+    provider = providers[idx]
+    search_term = context.user_data.get("pending_search_term", "")
+    if not search_term:
+        return await query.edit_message_text("❌ No search term. Start with /schedule.")
+
+    await query.edit_message_text(
+        f"🔍 Searching *{provider.get('nickname', 'provider')}* for: *{search_term}*...",
+        parse_mode="Markdown",
+    )
+
+    await _do_schedule_search(update, context, provider, search_term)
 
 
 async def _send_product_page(update_or_query, context, page_idx: int):
@@ -828,7 +905,7 @@ async def on_time_input(update, context):
     new_post = {
         "id": str(uuid.uuid4())[:8],
         "page_id": page["id"],
-        "provider_name": "aliexpress",
+        "provider_name": context.user_data.get("awaiting_provider", "aliexpress"),
         "search_term": context.user_data.get("schedule_search_term", ""),
         "product_id": selected.get("product_id", ""),
         "product_name": selected.get("name", ""),
@@ -851,6 +928,8 @@ async def on_time_input(update, context):
     context.user_data["awaiting_schedule_time"] = False
     context.user_data["awaiting_product"] = None
     context.user_data["awaiting_page"] = None
+    context.user_data["awaiting_provider"] = None
+    context.user_data["pending_search_term"] = None
 
     await update.message.reply_text(
         f"✅ *Scheduled!*\n\n"
@@ -892,6 +971,7 @@ def build_application(token: str) -> Application:
     app.add_handler(CommandHandler("schedule", cmd_schedule))
 
     # Callback handlers (buttons)
+    app.add_handler(CallbackQueryHandler(on_pick_provider, pattern=r"^provider_"))
     app.add_handler(CallbackQueryHandler(on_pick_product, pattern=r"^pick_"))
     app.add_handler(CallbackQueryHandler(on_schedule_page, pattern=r"^spage_"))
     app.add_handler(CallbackQueryHandler(on_pick_page, pattern=r"^page_"))
