@@ -566,13 +566,22 @@ async def _send_product_page(update_or_query, context, page_idx: int):
     end = start + 5
     page_products = products[start:end]
 
-    # Determine chat target
-    if hasattr(update_or_query, "message") and update_or_query.message:
-        chat = update_or_query.message
-    elif hasattr(update_or_query, "reply_photo"):
-        chat = update_or_query
-    else:
-        chat = update_or_query
+    # ---- Determine chat_id (works for Update, Chat, Message, CallbackQuery) ----
+    chat_id = None
+    if hasattr(update_or_query, "effective_chat") and update_or_query.effective_chat:
+        chat_id = update_or_query.effective_chat.id
+    elif hasattr(update_or_query, "message") and update_or_query.message:
+        chat_id = update_or_query.message.chat_id
+    elif hasattr(update_or_query, "chat_id"):
+        chat_id = update_or_query.chat_id
+    elif hasattr(update_or_query, "id"):
+        chat_id = update_or_query.id
+    elif hasattr(update_or_query, "chat") and update_or_query.chat:
+        chat_id = update_or_query.chat.id
+
+    if not chat_id:
+        print("⚠️ _send_product_page: could not determine chat_id")
+        return
 
     for i, p in enumerate(page_products):
         global_idx = start + i
@@ -591,22 +600,25 @@ async def _send_product_page(update_or_query, context, page_idx: int):
 
         try:
             if image_url:
-                await chat.reply_photo(
+                await context.bot.send_photo(
+                    chat_id=chat_id,
                     photo=image_url,
                     caption=caption,
                     parse_mode="Markdown",
                     reply_markup=reply_markup,
                 )
             else:
-                await chat.reply_text(
-                    caption,
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=caption,
                     parse_mode="Markdown",
                     reply_markup=reply_markup,
                 )
         except Exception as img_err:
             print(f"⚠️ Photo failed for product {global_idx}: {img_err}")
-            await chat.reply_text(
-                caption,
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=caption,
                 parse_mode="Markdown",
                 reply_markup=reply_markup,
             )
@@ -625,8 +637,9 @@ async def _send_product_page(update_or_query, context, page_idx: int):
                 callback_data=f"spage_{next_page_idx}"
             ),
         ]]
-        await chat.reply_text(
-            f"📄 Showing {start + 1}–{end} of {len(products)}",
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"📄 Showing {start + 1}–{end} of {len(products)}",
             reply_markup=InlineKeyboardMarkup(nav_keyboard),
         )
     else:
@@ -637,13 +650,15 @@ async def _send_product_page(update_or_query, context, page_idx: int):
                     callback_data=f"spage_{page_idx - 1}"
                 )
             ]]
-            await chat.reply_text(
-                f"📄 Showing {start + 1}–{len(products)} of {len(products)} (end)",
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"📄 Showing {start + 1}–{len(products)} of {len(products)} (end)",
                 reply_markup=InlineKeyboardMarkup(nav_keyboard),
             )
         else:
-            await chat.reply_text(
-                f"📄 Showing {start + 1}–{len(products)} of {len(products)} (end)"
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"📄 Showing {start + 1}–{len(products)} of {len(products)} (end)"
             )
 
 
@@ -672,21 +687,19 @@ async def on_schedule_page(update, context):
 
     await query.edit_message_text(f"📄 Loading page {page_idx + 1}...")
 
-    await _send_product_page(update.effective_chat, context, page_idx=page_idx)
+    await _send_product_page(update, context, page_idx=page_idx)
     context.user_data["schedule_page"] = page_idx
 
 
 async def on_pick_product(update, context):
-    """Handle product selection — then ask which page."""
+    """Handle product selection — send a page picker tied to this product."""
     query = update.callback_query
     await query.answer()
 
     if not is_authorized(update):
         return
 
-    data = query.data
-    idx = int(data.split("_")[1])
-
+    idx = int(query.data.split("_")[1])
     products = context.user_data.get("schedule_products", [])
     if idx >= len(products):
         await context.bot.send_message(
@@ -696,29 +709,27 @@ async def on_pick_product(update, context):
         return
 
     selected = products[idx]
-    context.user_data["schedule_selected"] = selected
-
     name = selected.get("name", "Product")[:60]
     price = selected.get("sale_price_usd", "N/A")
 
-    # Load pages
     config = load_config()
     pages = config.get("pages", [])
     if not pages:
-        context.user_data["awaiting_schedule_time"] = False
         await context.bot.send_message(
             chat_id=query.message.chat_id,
             text="❌ No Facebook pages configured.",
         )
         return
 
-    # Build page buttons
+    # Encode BOTH page index AND product index in callback data
     keyboard = []
     for i, p in enumerate(pages):
         pname = p.get("name") or p.get("id")
-        keyboard.append([InlineKeyboardButton(f"📄 {pname}", callback_data=f"page_{i}")])
+        keyboard.append([InlineKeyboardButton(
+            f"📄 {pname}",
+            callback_data=f"page_{i}_{idx}"   # <-- includes product idx
+        )])
 
-    # Send a NEW message (do NOT edit the photo message)
     await context.bot.send_message(
         chat_id=query.message.chat_id,
         text=(
@@ -731,38 +742,42 @@ async def on_pick_product(update, context):
     )
 
 async def on_pick_page(update, context):
-    """Handle page selection — then ask for time."""
+    """Handle page selection — ask for time for THIS specific product."""
     query = update.callback_query
     await query.answer()
 
     if not is_authorized(update):
-        return await query.edit_message_text("🚫 Unauthorized.")
+        return
 
-    idx = int(query.data.split("_")[1])
+    parts = query.data.split("_")   # ["page", page_idx, prod_idx]
+    if len(parts) != 3:
+        return
+    page_idx = int(parts[1])
+    prod_idx = int(parts[2])
+
     config = load_config()
     pages = config.get("pages", [])
-    if idx >= len(pages):
-        return await query.edit_message_text("❌ Page no longer available.")
+    products = context.user_data.get("schedule_products", [])
 
-    page = pages[idx]
-    context.user_data["schedule_page"] = page
-    selected = context.user_data.get("schedule_selected", {})
-    name = selected.get("name", "Product")[:60]
-    price = selected.get("sale_price_usd", "N/A")
+    if page_idx >= len(pages) or prod_idx >= len(products):
+        return await query.edit_message_text("❌ Selection expired. Start with /schedule.")
+
+    page = pages[page_idx]
+    selected = products[prod_idx]
+
+    # Store the awaiting state — this is the CURRENT flow
+    context.user_data["awaiting_product"] = selected
+    context.user_data["awaiting_page"] = page
+    context.user_data["awaiting_schedule_time"] = True
 
     await query.edit_message_text(
-        f"✅ Selected: *{name}*\n"
-        f"💰 ${price}\n"
+        f"✅ Selected: *{selected.get('name', '')[:60]}*\n"
+        f"💰 ${selected.get('sale_price_usd', 'N/A')}\n"
         f"📄 Page: *{page.get('name') or page.get('id')}*\n\n"
         f"⏰ When should I schedule it?\n"
-        f"Reply with a duration, e.g.:\n"
-        f"• `30m` — 30 minutes\n"
-        f"• `3h` — 3 hours\n"
-        f"• `1d` — 1 day",
+        f"Reply with a duration, e.g. `30m`, `3h`, `1d`",
         parse_mode="Markdown",
     )
-
-    context.user_data["awaiting_schedule_time"] = True
 
 async def on_time_input(update, context):
     """Handle the time reply (only fires when awaiting_schedule_time is True)."""
@@ -792,7 +807,7 @@ async def on_time_input(update, context):
     else:
         return await update.message.reply_text("❌ Unknown unit.")
 
-    selected = context.user_data.get("schedule_selected")
+    selected = context.user_data.get("awaiting_product")
     if not selected:
         context.user_data["awaiting_schedule_time"] = False
         return await update.message.reply_text("❌ No product selected. Start with /schedule.")
@@ -805,7 +820,7 @@ async def on_time_input(update, context):
         config["scheduled_affiliate_posts"] = []
 
     # Use the page the user selected
-    page = context.user_data.get("schedule_page")
+    page = context.user_data.get("awaiting_page")
     if not page:
         context.user_data["awaiting_schedule_time"] = False
         return await update.message.reply_text("❌ No page selected. Start with /schedule.")
@@ -834,8 +849,8 @@ async def on_time_input(update, context):
     save_config(config)
 
     context.user_data["awaiting_schedule_time"] = False
-    context.user_data["schedule_selected"] = None
-    context.user_data["schedule_page"] = None
+    context.user_data["awaiting_product"] = None
+    context.user_data["awaiting_page"] = None
 
     await update.message.reply_text(
         f"✅ *Scheduled!*\n\n"
