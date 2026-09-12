@@ -20,6 +20,8 @@ from telegram.ext import (
     filters,
 )
 
+from config.config import get_api_key, get_model_name
+
 logger = logging.getLogger(__name__)
 
 # Global reference to the active bot application (set at startup)
@@ -216,14 +218,24 @@ async def cmd_status(update, context):
     scheduled = [p for p in config.get("scheduled_affiliate_posts", []) if not p.get("posted")]
 
     status_emoji = "🔴 PAUSED" if paused else "🟢 RUNNING"
+    lang = context.user_data.get("reply_language", "en")
 
-    text = (
-        f"🤖 *Vigil AI Plus*\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"Status: {status_emoji}\n"
-        f"Pages: {len(pages)}\n"
-        f"Scheduled: {len(scheduled)} affiliate posts"
-    )
+    if lang.startswith("ur"):
+        text = (
+            f"🤖 *Vigil AI Plus*\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"اسٹیٹس: {status_emoji}\n"
+            f"صفحات: {len(pages)}\n"
+            f"شیڈول شدہ: {len(scheduled)} پوسٹس"
+        )
+    else:
+        text = (
+            f"🤖 *Vigil AI Plus*\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"Status: {status_emoji}\n"
+            f"Pages: {len(pages)}\n"
+            f"Scheduled: {len(scheduled)} affiliate posts"
+        )
     await update.message.reply_text(text, parse_mode="Markdown")
 
 
@@ -232,7 +244,13 @@ async def cmd_pause(update, context):
         return await deny(update)
     main = get_main_module()
     main.BOT_PAUSED = True
-    await update.message.reply_text("⏸️ Bot paused. No posts will be published until /resume.")
+    lang = context.user_data.get("reply_language", "en")
+    await update.message.reply_text(
+        _lang_text(lang,
+            "⏸️ Bot paused. No posts will be published until /resume.",
+            "⏸️ بوٹ روک دیا گیا۔ دوبارہ شروع کرنے تک کوئی پوسٹ نہیں ہوگی۔"
+        )
+    )
 
 
 async def cmd_resume(update, context):
@@ -240,7 +258,13 @@ async def cmd_resume(update, context):
         return await deny(update)
     main = get_main_module()
     main.BOT_PAUSED = False
-    await update.message.reply_text("▶️ Bot resumed. Scheduler will tick at the next minute mark.")
+    lang = context.user_data.get("reply_language", "en")
+    await update.message.reply_text(
+        _lang_text(lang,
+            "▶️ Bot resumed. Scheduler will tick at the next minute mark.",
+            "▶️ بوٹ دوبارہ چل پڑا۔ اگلے منٹ میں شیڈیولر کام کرے گا۔"
+        )
+    )
 
 
 async def cmd_pages(update, context):
@@ -954,6 +978,163 @@ async def on_text_input(update, context):
     # Otherwise: ignore silently (don't spam the user)
     return
 
+# ============ Voice command support ============
+
+def _lang_text(lang: str, en_text: str, ur_text: str) -> str:
+    """Return text in the correct language based on detected input language."""
+    if lang and lang.startswith("ur"):
+        return ur_text
+    return en_text
+
+
+async def on_voice_message(update, context):
+    """Handle voice notes — transcribe + parse intent + route to command."""
+    if not is_authorized(update):
+        return await deny(update)
+
+    voice = update.message.voice
+    if not voice:
+        return
+
+    # Download voice file
+    try:
+        file = await context.bot.get_file(voice.file_id)
+        import tempfile
+        tmp_path = os.path.join(tempfile.gettempdir(), f"voice_{voice.file_unique_id}.ogg")
+        await file.download_to_drive(tmp_path)
+    except Exception as e:
+        return await update.message.reply_text(f"❌ Could not download voice: {e}")
+
+    # Acknowledge
+    await update.message.reply_text("🎤 Transcribing...")
+
+    # Transcribe using configured STT provider
+    from src.utils.voice_processor import transcribe_voice
+    config = load_config()
+    stt_provider = config.get("stt_provider", "groq")
+
+    result = await transcribe_voice(tmp_path, provider_name=stt_provider, language=None)
+
+    # Clean up temp file
+    try:
+        os.remove(tmp_path)
+    except Exception:
+        pass
+
+    if not result or not result.get("text"):
+        return await update.message.reply_text(
+            "❌ Could not understand the voice note. Please try again.\n"
+            "❌ آواز سمجھ نہیں آئی۔ دوبارہ کوشش کریں۔"
+        )
+
+    text = result["text"]
+    lang = result["language"]
+
+    # Store language for future replies in this session
+    context.user_data["reply_language"] = lang
+
+    # Parse intent with LLM
+    intent = await _parse_voice_intent(text, lang)
+    if not intent or intent.get("intent") == "unknown":
+        return await update.message.reply_text(
+            _lang_text(lang,
+                f"🎤 Heard: _{text}_\n\n❌ No matching command.",
+                f"🎤 سنا: _{text}_\n\n❌ کوئی کمانڈ نہیں ملی۔"
+            ),
+            parse_mode="Markdown"
+        )
+
+    await _execute_voice_intent(intent, update, context, text, lang)
+
+
+async def _parse_voice_intent(text, lang):
+    """Use LLM to extract intent + parameters from transcribed text."""
+    prompt = f"""You are a command parser for a Facebook automation bot.
+
+User said (may contain transcription errors): "{text}"
+Detected language: {lang}
+
+Available intents:
+- schedule_product (needs: search_term) — user wants to schedule a product to post
+- queue_status — user wants to see scheduled posts
+- pause_bot — pause all posting
+- resume_bot — resume posting
+- bot_status — check bot status
+- list_pages — list connected Facebook pages
+- post_now — trigger immediate test post
+- cancel_post (needs: post_id) — cancel a scheduled post
+
+Respond ONLY with valid JSON, no extra text.
+Example: {{"intent": "schedule_product", "search_term": "watch"}}
+If no intent matches, return: {{"intent": "unknown"}}"""
+
+    # Use Groq
+    try:
+        api_key = get_api_key("groq")
+        if not api_key:
+            return None
+        from groq import Groq
+        client = Groq(api_key=api_key)
+        model = get_model_name("groq") or "openai/gpt-oss-120b"
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+            temperature=0.1,
+        )
+        import json as _json
+        return _json.loads(response.choices[0].message.content)
+    except Exception as e:
+        print(f"⚠️ Intent parse failed: {e}")
+        return None
+
+
+async def _execute_voice_intent(intent, update, context, raw_text, lang):
+    """Route parsed intent to existing command handlers."""
+    intent_type = intent.get("intent", "unknown")
+
+    if intent_type == "schedule_product":
+        search_term = (intent.get("search_term") or "").strip()
+        if not search_term:
+            return await update.message.reply_text(
+                _lang_text(lang, "❌ No product name detected.", "❌ پروڈکٹ کا نام نہیں ملا۔")
+            )
+        context.args = search_term.split()
+        return await cmd_schedule(update, context)
+
+    if intent_type == "queue_status":
+        return await cmd_queue(update, context)
+
+    if intent_type == "pause_bot":
+        return await cmd_pause(update, context)
+
+    if intent_type == "resume_bot":
+        return await cmd_resume(update, context)
+
+    if intent_type == "bot_status":
+        return await cmd_status(update, context)
+
+    if intent_type == "list_pages":
+        return await cmd_pages(update, context)
+
+    if intent_type == "post_now":
+        return await cmd_post(update, context)
+
+    if intent_type == "cancel_post":
+        post_id = (intent.get("post_id") or "").strip()
+        if post_id:
+            context.args = [post_id]
+            return await cmd_cancel(update, context)
+        return await update.message.reply_text("❌ No post ID detected.")
+
+    return await update.message.reply_text(
+        _lang_text(lang,
+            f"🎤 Heard: _{raw_text}_\n\n❌ Unknown command.",
+            f"🎤 سنا: _{raw_text}_\n\n❌ نامعلوم کمانڈ۔"
+        ),
+        parse_mode="Markdown"
+    )
+
 # ============ Bot lifecycle ============
 
 def build_application(token: str) -> Application:
@@ -981,7 +1162,8 @@ def build_application(token: str) -> Application:
 
     # Single unified text handler (dispatches based on state)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text_input))
-
+    # Voice message handler
+    app.add_handler(MessageHandler(filters.VOICE, on_voice_message))
     global _bot_app
     _bot_app = app
 
