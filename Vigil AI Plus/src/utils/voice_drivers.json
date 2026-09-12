@@ -1,0 +1,28 @@
+{
+  "groq": {
+    "provider_type": "openai_compatible",
+    "base_url": "https://api.groq.com/openai/v1/audio/transcriptions",
+    "auth_type": "bearer",
+    "api_key_source": "groq",
+    "model": "whisper-large-v3",
+    "response_format": "verbose_json",
+    "field_name": "file"
+  },
+  "openai": {
+    "provider_type": "openai_compatible",
+    "base_url": "https://api.openai.com/v1/audio/transcriptions",
+    "auth_type": "bearer",
+    "api_key_source": "openai",
+    "model": "whisper-1",
+    "response_format": "verbose_json",
+    "field_name": "file"
+  },
+  "deepgram": {
+    "provider_type": "deepgram",
+    "base_url": "https://api.deepgram.com/v1/listen",
+    "auth_type": "token",
+    "api_key_source": "deepgram",
+    "model": "nova-2",
+    "language": "ur"
+  }
+}
