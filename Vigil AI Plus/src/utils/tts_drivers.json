@@ -1,0 +1,17 @@
+{
+  "gtts": {
+    "provider_type": "gtts",
+    "lang_map": {
+      "ur": "ur",
+      "en": "en"
+    },
+    "slow": false
+  },
+  "edge": {
+    "provider_type": "edge",
+    "voice_map": {
+      "ur": "ur-PK-AsadNeural",
+      "en": "en-US-GuyNeural"
+    }
+  }
+}
